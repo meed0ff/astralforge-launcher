@@ -1,0 +1,10 @@
+{
+  "repo_owner": "YourGithubUsername",
+  "repo_name": "astralforge-repo",
+  "branch": "main",
+  "minecraft_version": "1.21.1",
+  "loader_type": "neoforge",
+  "loader_version": "21.1.267",
+  "server_name": "AstralForge",
+  "server_ip": "eternum.aurorix.pro"
+}

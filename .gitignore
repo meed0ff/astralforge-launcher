@@ -1,0 +1,19 @@
+# Node / Frontend
+node_modules/
+launcher/node_modules/
+
+# Rust / Tauri
+target/
+launcher/src-tauri/target/
+*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+
+# OS & Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

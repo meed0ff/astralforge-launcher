@@ -1,0 +1,14 @@
+{
+  "name": "astralforge-launcher",
+  "version": "1.0.0",
+  "description": "AstralForge Minecraft Launcher for 1.21.1 NeoForge",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "preview": "python3 ../preview_server.py"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

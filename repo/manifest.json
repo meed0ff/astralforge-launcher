@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "server": {
+    "name": "AstralForge",
+    "ip": "eternum.aurorix.pro"
+  },
+  "minecraft": {
+    "version": "1.21.1"
+  },
+  "loader": {
+    "type": "neoforge",
+    "version": "21.1.267",
+    "installer_url": "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.267/neoforge-21.1.267-installer.jar"
+  },
+  "elyby": {
+    "clientId": "astralforge1"
+  },
+  "files": []
+}
