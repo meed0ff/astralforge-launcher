@@ -14,9 +14,6 @@ use server_ping::ServerStatus;
 use std::fs;
 use tauri::{AppHandle, Emitter};
 
-// Временное переопределение адреса сервера для тестов
-const TEMP_TEST_SERVER_IP: Option<&str> = Some("d5.aurorix.net:19804");
-
 #[derive(serde::Deserialize)]
 pub struct LaunchRequest {
     pub nickname: String,
@@ -201,8 +198,6 @@ async fn start_sync_and_launch(
         None
     };
 
-    let target_server_ip = TEMP_TEST_SERVER_IP.unwrap_or(&manifest.server.ip);
-
     // 5. Запуск Minecraft
     game_launcher::launch_minecraft(
         &app,
@@ -214,7 +209,7 @@ async fn start_sync_and_launch(
         &request.auth_type,
         &request.uuid,
         &request.access_token,
-        target_server_ip,
+        &manifest.server.ip,
         &manifest.minecraft.version,
         &manifest.loader.loader_type,
         &manifest.loader.version,

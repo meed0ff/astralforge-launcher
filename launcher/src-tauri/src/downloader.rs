@@ -197,15 +197,31 @@ pub fn get_available_disk_space(path: &Path) -> Option<u64> {
     }
     #[cfg(windows)]
     {
-        let probe_str = probe.to_string_lossy().replace('\'', "''");
-        let script = format!("(Get-Item -LiteralPath '{}').PSDrive.Free", probe_str);
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output()
-            .ok()?;
-        if out.status.success() {
-            let txt = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return txt.parse::<u64>().ok();
+        use std::os::windows::ffi::OsStrExt;
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                lpDirectoryName: *const u16,
+                lpFreeBytesAvailableToCaller: *mut u64,
+                lpTotalNumberOfBytes: *mut u64,
+                lpTotalNumberOfFreeBytes: *mut u64,
+            ) -> i32;
+        }
+        let wide: Vec<u16> = probe
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut free_available: u64 = 0;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_available,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Some(free_available);
         }
         None
     }

@@ -1,18 +1,15 @@
 // Eternum Launcher Frontend Logic
 const hasTauri = typeof window.__TAURI__ !== "undefined";
 
-// Временный тестовый сервер (оставьте пустым, чтобы брать IP из manifest.json)
-const TEMP_TEST_SERVER = "d5.aurorix.net:19804";
-
 // State
 let currentTab = "elyby"; // "elyby" | "offline"
 let elybyAccount = null;
 let gameState = "idle"; // "idle" | "launching" | "running" | "stopping"
 let serverData = {
-  ip: "d5.aurorix.net",
-  port: 19804,
-  fallbackIp: "d5.aurorix.net",
-  fallbackPort: 19804
+  ip: "eternum.aurorix.pro",
+  port: 25565,
+  fallbackIp: "eternum.aurorix.pro",
+  fallbackPort: 25565
 };
 
 // DOM Elements
@@ -464,10 +461,9 @@ function refreshManifestMetadata() {
       if (serverTitleEl && info.server_name) {
         serverTitleEl.textContent = info.server_name;
       }
-      const effectiveServerIp = TEMP_TEST_SERVER || info.server_ip;
-      if (effectiveServerIp) {
-        if (serverIpText) serverIpText.textContent = effectiveServerIp;
-        const parsed = parseServerAddr(effectiveServerIp);
+      if (info.server_ip) {
+        if (serverIpText) serverIpText.textContent = info.server_ip;
+        const parsed = parseServerAddr(info.server_ip);
         serverData.ip = parsed.ip;
         serverData.port = parsed.port;
         serverData.fallbackIp = parsed.ip;
