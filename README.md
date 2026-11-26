@@ -13,10 +13,12 @@
 Готовые портативные программы для **Windows** и **Linux** (без установщиков) собираются через GitHub Actions и доступны во вкладке **[Releases](../../releases)**:
 * **Для игроков:**
   * Windows: `EternumLauncher-win64.exe`
-  * Linux: `EternumLauncher-linux-x86_64.AppImage` (`chmod +x EternumLauncher-linux-x86_64.AppImage && ./EternumLauncher-linux-x86_64.AppImage`)
+  * Fedora (нативный бинарник): `EternumLauncher-fedora-x86_64` (`chmod +x EternumLauncher-fedora-x86_64 && ./EternumLauncher-fedora-x86_64`)
+  * Linux (универсальный AppImage): `EternumLauncher-linux-x86_64.AppImage` (`chmod +x EternumLauncher-linux-x86_64.AppImage && ./EternumLauncher-linux-x86_64.AppImage`)
 * **Для администраторов сборки:**
   * Windows: `EternumModpackManager-win64.exe`
-  * Linux: `EternumModpackManager-linux-x86_64.AppImage` (`chmod +x` и запуск)
+  * Fedora (нативный бинарник): `EternumModpackManager-fedora-x86_64` (`chmod +x` и запуск)
+  * Linux (универсальный AppImage): `EternumModpackManager-linux-x86_64.AppImage` (`chmod +x` и запуск)
 
 > **Примечание для Windows:** официальная сборка в Releases собрана через MSVC, поэтому запускается одним `.exe` файлом. При локальной сборке через MinGW (`x86_64-pc-windows-gnu`) рядом с `.exe` должен лежать `WebView2Loader.dll`.
 

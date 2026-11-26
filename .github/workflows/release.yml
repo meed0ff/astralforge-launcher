@@ -141,9 +141,65 @@ jobs:
           name: linux-portable
           path: release-linux/*
 
+  build-fedora:
+    name: Fedora Native Binary (ELF x86_64)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - name: Install Fedora Tauri dependencies & toolchain
+        run: |
+          dnf install -y \
+            webkit2gtk4.1-devel \
+            openssl-devel \
+            curl \
+            wget \
+            file \
+            tar \
+            gzip \
+            git \
+            gcc \
+            gcc-c++ \
+            pkgconf-pkg-config \
+            libappindicator-gtk3-devel \
+            librsvg2-devel \
+            nodejs \
+            npm
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Eternum Launcher (Fedora binary)
+        working-directory: launcher
+        run: |
+          npm ci
+          npx tauri build --no-bundle
+
+      - name: Build Eternum Modpack Manager (Fedora binary)
+        working-directory: manifest-gen-gui
+        run: |
+          npm ci
+          npx tauri build --no-bundle
+
+      - name: Collect Fedora binaries
+        run: |
+          mkdir -p release-fedora
+          cp "launcher/src-tauri/target/release/eternum-launcher" "release-fedora/EternumLauncher-fedora-x86_64"
+          cp "manifest-gen-gui/src-tauri/target/release/eternum-manifest-studio" "release-fedora/EternumModpackManager-fedora-x86_64"
+          chmod +x release-fedora/*
+          ls -lh release-fedora
+
+      - name: Upload Fedora binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-portable
+          path: release-fedora/*
+
   publish-release:
     name: Publish GitHub Release
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-fedora]
     runs-on: ubuntu-latest
     steps:
       - name: Download Windows artifacts
@@ -152,10 +208,16 @@ jobs:
           name: windows-portable
           path: release-assets
 
-      - name: Download Linux artifacts
+      - name: Download Linux AppImage artifacts
         uses: actions/download-artifact@v4
         with:
           name: linux-portable
+          path: release-assets
+
+      - name: Download Fedora binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: fedora-portable
           path: release-assets
 
       - name: Determine release tag
@@ -179,8 +241,12 @@ jobs:
             - `EternumLauncher-win64.exe` — лаунчер для игроков
             - `EternumModpackManager-win64.exe` — менеджер сборки для администраторов
 
-            ### Linux (x86_64)
-            - `EternumLauncher-linux-x86_64.AppImage` — портативный лаунчер (`chmod +x` и запуск)
-            - `EternumModpackManager-linux-x86_64.AppImage` — портативный менеджер сборки (`chmod +x` и запуск)
+            ### Fedora / Linux (нативные бинарники)
+            - `EternumLauncher-fedora-x86_64` — нативный бинарник лаунчера (`chmod +x` и `./EternumLauncher-fedora-x86_64`)
+            - `EternumModpackManager-fedora-x86_64` — нативный бинарник менеджера сборки
+
+            ### Linux (универсальный AppImage)
+            - `EternumLauncher-linux-x86_64.AppImage` — портативный лаунчер
+            - `EternumModpackManager-linux-x86_64.AppImage` — портативный менеджер сборки
           files: release-assets/*
           make_latest: true
