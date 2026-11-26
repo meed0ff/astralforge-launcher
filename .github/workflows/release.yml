@@ -1,0 +1,186 @@
+name: Build Portable Releases (Windows & Linux)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Windows Portable (.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache (launcher)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "launcher/src-tauri"
+
+      - name: Rust cache (manifest-gen-gui)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "manifest-gen-gui/src-tauri"
+
+      - name: Build Eternum Launcher (portable)
+        working-directory: launcher
+        run: |
+          npm ci
+          npx tauri build --no-bundle
+
+      - name: Build Eternum Modpack Manager (portable)
+        working-directory: manifest-gen-gui
+        run: |
+          npm ci
+          npx tauri build --no-bundle
+
+      - name: Collect portable Windows binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release-win -Force | Out-Null
+          Copy-Item "launcher/src-tauri/target/release/eternum-launcher.exe" "release-win/EternumLauncher-win64.exe" -Force
+          Copy-Item "manifest-gen-gui/src-tauri/target/release/eternum-manifest-studio.exe" "release-win/EternumModpackManager-win64.exe" -Force
+          if (Test-Path "launcher/src-tauri/target/release/WebView2Loader.dll") {
+            Copy-Item "launcher/src-tauri/target/release/WebView2Loader.dll" "release-win/WebView2Loader.dll" -Force
+          }
+          Get-ChildItem release-win | Select-Object Name, Length
+
+      - name: Upload Windows portable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: release-win/*
+
+  build-linux:
+    name: Linux Portable (.AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache (launcher)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "launcher/src-tauri"
+
+      - name: Rust cache (manifest-gen-gui)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "manifest-gen-gui/src-tauri"
+
+      - name: Build Eternum Launcher (AppImage)
+        working-directory: launcher
+        env:
+          NO_STRIP: "true"
+        run: |
+          npm ci
+          npx tauri build --bundles appimage
+
+      - name: Build Eternum Modpack Manager (AppImage)
+        working-directory: manifest-gen-gui
+        env:
+          NO_STRIP: "true"
+        run: |
+          npm ci
+          npx tauri build --bundles appimage
+
+      - name: Collect portable Linux AppImages
+        run: |
+          mkdir -p release-linux
+          LAUNCHER_AI=$(find launcher/src-tauri/target/release/bundle/appimage -maxdepth 1 -name "*.AppImage" | head -n 1)
+          MANAGER_AI=$(find manifest-gen-gui/src-tauri/target/release/bundle/appimage -maxdepth 1 -name "*.AppImage" | head -n 1)
+          cp "$LAUNCHER_AI" "release-linux/EternumLauncher-linux-x86_64.AppImage"
+          cp "$MANAGER_AI" "release-linux/EternumModpackManager-linux-x86_64.AppImage"
+          chmod +x release-linux/*.AppImage
+          ls -lh release-linux
+
+      - name: Upload Linux portable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-portable
+          path: release-linux/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-portable
+          path: release-assets
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-portable
+          path: release-assets
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Eternum Launcher & Modpack Manager (${{ steps.tag.outputs.name }})
+          body: |
+            Портативные сборки **Eternum Launcher** и **Eternum Modpack Manager** для **Windows** и **Linux** (без установщиков).
+
+            ### Windows (x64)
+            - `EternumLauncher-win64.exe` — лаунчер для игроков
+            - `EternumModpackManager-win64.exe` — менеджер сборки для администраторов
+
+            ### Linux (x86_64)
+            - `EternumLauncher-linux-x86_64.AppImage` — портативный лаунчер (`chmod +x` и запуск)
+            - `EternumModpackManager-linux-x86_64.AppImage` — портативный менеджер сборки (`chmod +x` и запуск)
+          files: release-assets/*
+          make_latest: true

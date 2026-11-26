@@ -8,14 +8,17 @@
 
 ---
 
-## 📦 Готовые сборки (Releases)
+## 📦 Готовые портативные сборки (Releases)
 
-Готовые установщики и портативные архивы доступны во вкладке **[Releases](../../releases)** этого репозитория:
-* **Для игроков (Windows):** установщик `Eternum.Launcher_1.0.0_x64-setup.exe` / `.msi` или портативный `EternumLauncher-win64-portable.zip`.
-* **Для администраторов сборки (Windows):** установщик `Eternum.Modpack.Manager_1.0.0_x64-setup.exe` / `.msi` или портативный `EternumModpackManager-win64-portable.zip`.
-* **Для Linux:** соберите пакеты (`.AppImage`, `.deb`, `.rpm`) по инструкции в разделе [Сборка из исходников (Linux)](#linux) ниже.
+Готовые портативные программы для **Windows** и **Linux** (без установщиков) собираются через GitHub Actions и доступны во вкладке **[Releases](../../releases)**:
+* **Для игроков:**
+  * Windows: `EternumLauncher-win64.exe`
+  * Linux: `EternumLauncher-linux-x86_64.AppImage` (`chmod +x EternumLauncher-linux-x86_64.AppImage && ./EternumLauncher-linux-x86_64.AppImage`)
+* **Для администраторов сборки:**
+  * Windows: `EternumModpackManager-win64.exe`
+  * Linux: `EternumModpackManager-linux-x86_64.AppImage` (`chmod +x` и запуск)
 
-> **Важно для портативных `.zip` на Windows:** рядом с `eternum-launcher.exe` и `eternum-manifest-studio.exe` обязательно должен лежать файл `WebView2Loader.dll` из архива. В установщиках `.setup.exe` / `.msi` всё уже включено автоматически.
+> **Примечание для Windows:** официальная сборка в Releases собрана через MSVC, поэтому запускается одним `.exe` файлом. При локальной сборке через MinGW (`x86_64-pc-windows-gnu`) рядом с `.exe` должен лежать `WebView2Loader.dll`.
 
 ---
 
@@ -121,15 +124,15 @@
 Требуется: **Rust** (`x86_64-pc-windows-gnu` или `x86_64-pc-windows-msvc`), **Node.js LTS (v20+)**, **WebView2 Runtime** (встроен в Windows 10/11).
 
 ```powershell
-# 1. Лаунчер (соберёт eternum-launcher.exe + NSIS/MSI установщики)
+# 1. Лаунчер (соберёт только eternum-launcher.exe без установщиков)
 cd launcher
 npm install
-npm run build
+npx tauri build --no-bundle
 
-# 2. Менеджер сборки GUI (соберёт eternum-manifest-studio.exe + NSIS/MSI установщики)
+# 2. Менеджер сборки GUI (соберёт только eternum-manifest-studio.exe без установщиков)
 cd ..\manifest-gen-gui
 npm install
-npm run build
+npx tauri build --no-bundle
 ```
 
 ### Linux
@@ -148,10 +151,10 @@ npm run build
   sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module libappindicator-gtk3 librsvg
   ```
 
-Далее сборка пакетов (`.AppImage`, `.deb`, `.rpm` и бинарников в `src-tauri/target/release/`):
+Далее сборка портативного `.AppImage` (и бинарников в `src-tauri/target/release/`):
 ```bash
-cd launcher && npm install && npm run build
-cd ../manifest-gen-gui && npm install && npm run build
+cd launcher && npm install && npx tauri build --bundles appimage
+cd ../manifest-gen-gui && npm install && npx tauri build --bundles appimage
 ```
 
 Для диалога выбора папки в Linux-версии менеджера сборки используется `zenity` или `kdialog`.
