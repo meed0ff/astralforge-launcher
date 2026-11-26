@@ -3,17 +3,17 @@
 Комплексное open-source решение для вашего сервера Minecraft без сторонних бэкендов:
 1. **`launcher/`** — десктопный лаунчер на **Tauri v2** (Rust + HTML5/CSS3/Vanilla JS) с поддержкой **Fabric** и **NeoForge**, авторизацией **Ely.by OAuth2** (`authlib-injector`) и офлайн-режимом, счётчиком скорости/размера скачивания и проверкой места на диске.
 2. **`manifest-gen-gui/`** — графический менеджер сборки **Eternum Modpack Manager** (Tauri v2): выбор ядра (`Fabric` / `NeoForge` / `Forge` / вручную), автоподбор версий ядра под версию Minecraft, генерация `manifest.json`, двусторонняя синхронизация с GitHub и прямая публикация обновлений по токену **без необходимости устанавливать Git**.
-3. **`manifest-gen/`** — консольный автономный генератор `manifest.json` на Rust (Windows `.exe` и статический бинарник Linux `x86_64-unknown-linux-musl`).
-4. **`repo/`** — шаблон репозитория сборки (`repo_config.json`, `generate_manifest.py`, структура папок).
-5. **`preview_server.py`** — локальный HTTP-сервер для быстрого предпросмотра UI лаунчера в браузере.
+3. **`repo/`** — шаблон репозитория сборки (`repo_config.json`, `generate_manifest.py`, структура папок).
+4. **`preview_server.py`** — локальный HTTP-сервер для быстрого предпросмотра UI лаунчера в браузере.
 
 ---
 
 ## 📦 Готовые сборки (Releases)
 
 Готовые установщики и портативные архивы доступны во вкладке **[Releases](../../releases)** этого репозитория:
-* **Для игроков:** установщик `Eternum Launcher_..._setup.exe` / `.msi` или портативный `EternumLauncher-win64.zip`.
-* **Для администраторов сборки:** установщик `Eternum Modpack Manager_..._setup.exe` / `.msi`, портативный `EternumModpackManager-win64.zip` или консольный `eternum-manifest-gen-linux-x64` для Linux.
+* **Для игроков (Windows):** установщик `Eternum.Launcher_1.0.0_x64-setup.exe` / `.msi` или портативный `EternumLauncher-win64-portable.zip`.
+* **Для администраторов сборки (Windows):** установщик `Eternum.Modpack.Manager_1.0.0_x64-setup.exe` / `.msi` или портативный `EternumModpackManager-win64-portable.zip`.
+* **Для Linux:** соберите пакеты (`.AppImage`, `.deb`, `.rpm`) по инструкции в разделе [Сборка из исходников (Linux)](#linux) ниже.
 
 > **Важно для портативных `.zip` на Windows:** рядом с `eternum-launcher.exe` и `eternum-manifest-studio.exe` обязательно должен лежать файл `WebView2Loader.dll` из архива. В установщиках `.setup.exe` / `.msi` всё уже включено автоматически.
 
@@ -76,7 +76,6 @@
 ### Если хотите поменять значения по умолчанию в коде менеджера
 Отредактируйте функции `default_repo_owner()`, `default_repo_name()`, `default_branch()`, `default_server_name()`, `default_server_ip()` и др. в:
 * `manifest-gen-gui/src-tauri/src/main.rs` (строки 56–82)
-* `manifest-gen/src/main.rs` (строки 49–75) — для консольной версии
 * `repo/repo_config.json` — шаблон конфигурации
 
 ---
@@ -131,9 +130,6 @@ npm run build
 cd ..\manifest-gen-gui
 npm install
 npm run build
-
-# 3. Консольный генератор (опционально)
-cargo build --release --manifest-path ..\manifest-gen\Cargo.toml
 ```
 
 ### Linux
