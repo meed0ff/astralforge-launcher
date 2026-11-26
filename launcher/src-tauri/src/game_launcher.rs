@@ -1,4 +1,4 @@
-use crate::downloader::{download_file, ProgressPayload};
+use crate::downloader::{download_file, download_file_tracked, DownloadTracker, ProgressPayload};
 use crate::manifest::Manifest;
 use futures_util::stream::{self, StreamExt};
 use serde_json::Value;
@@ -70,9 +70,9 @@ pub const MOJANG_VERSION_MANIFEST_URL: &str =
 
 pub fn get_game_dir() -> PathBuf {
     if let Some(home) = dirs::home_dir() {
-        home.join(".astralforge")
+        home.join(".eternum")
     } else {
-        PathBuf::from(".astralforge")
+        PathBuf::from(".eternum")
     }
 }
 
@@ -180,6 +180,8 @@ async fn ensure_vanilla_installed(
     let client_jar = version_dir.join(format!("{}.jar", mc_version));
     if !client_jar.exists() {
         if let Some(client_url) = version_json["downloads"]["client"]["url"].as_str() {
+            let client_size = version_json["downloads"]["client"]["size"].as_u64().unwrap_or(0);
+            let tracker = DownloadTracker::new(client_size);
             let _ = app.emit(
                 "download-progress",
                 ProgressPayload {
@@ -188,13 +190,14 @@ async fn ensure_vanilla_installed(
                     log: Some(format!("Скачивание {}.jar с серверов Mojang...", mc_version)),
                 },
             );
-            download_file(client, client_url, &client_jar, "").await?;
+            download_file_tracked(app, &tracker, client, client_url, &client_jar, "", client_size).await?;
         }
     }
 
     // Библиотеки Mojang
     let libraries_dir = game_dir.join("libraries");
     let mut lib_downloads = Vec::new();
+    let mut libs_total_bytes: u64 = 0;
     if let Some(libs) = version_json["libraries"].as_array() {
         for lib in libs {
             if !rules_allow(lib.get("rules").and_then(|r| r.as_array())) {
@@ -207,7 +210,9 @@ async fn ensure_vanilla_installed(
                 ) {
                     let target = libraries_dir.join(path_str);
                     if !target.exists() {
-                        lib_downloads.push((url.to_string(), target));
+                        let size = artifact.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                        libs_total_bytes = libs_total_bytes.saturating_add(size);
+                        lib_downloads.push((url.to_string(), target, size));
                     }
                 }
             }
@@ -215,6 +220,7 @@ async fn ensure_vanilla_installed(
     }
 
     if !lib_downloads.is_empty() {
+        let tracker = DownloadTracker::new(libs_total_bytes);
         let _ = app.emit(
             "download-progress",
             ProgressPayload {
@@ -223,8 +229,11 @@ async fn ensure_vanilla_installed(
                 log: Some(format!("Загрузка {} недостающих библиотек Mojang...", lib_downloads.len())),
             },
         );
-        let results: Vec<Result<(), String>> = stream::iter(lib_downloads)
-            .map(|(url, target)| async move { download_file(client, &url, &target, "").await })
+        let results: Vec<Result<u64, String>> = stream::iter(lib_downloads)
+            .map(|(url, target, size)| {
+                let tracker = tracker.clone();
+                async move { download_file_tracked(app, &tracker, client, &url, &target, "", size).await }
+            })
             .buffer_unordered(12)
             .collect()
             .await;
@@ -250,6 +259,7 @@ async fn ensure_vanilla_installed(
         let objects_dir = game_dir.join("assets").join("objects");
 
         let mut asset_downloads = Vec::new();
+        let mut assets_total_bytes: u64 = 0;
         if let Some(objects) = idx_json["objects"].as_object() {
             for (_name, obj) in objects {
                 if let Some(hash) = obj["hash"].as_str() {
@@ -257,11 +267,13 @@ async fn ensure_vanilla_installed(
                         let prefix = &hash[..2];
                         let target = objects_dir.join(prefix).join(hash);
                         if !target.exists() {
+                            let size = obj["size"].as_u64().unwrap_or(0);
+                            assets_total_bytes = assets_total_bytes.saturating_add(size);
                             let url = format!(
                                 "https://resources.download.minecraft.net/{}/{}",
                                 prefix, hash
                             );
-                            asset_downloads.push((url, target));
+                            asset_downloads.push((url, target, size));
                         }
                     }
                 }
@@ -269,6 +281,7 @@ async fn ensure_vanilla_installed(
         }
 
         if !asset_downloads.is_empty() {
+            let tracker = DownloadTracker::new(assets_total_bytes);
             let _ = app.emit(
                 "download-progress",
                 ProgressPayload {
@@ -277,8 +290,11 @@ async fn ensure_vanilla_installed(
                     log: Some(format!("Скачивание {} отсутствующих ассетов...", asset_downloads.len())),
                 },
             );
-            let results: Vec<Result<(), String>> = stream::iter(asset_downloads)
-                .map(|(url, target)| async move { download_file(client, &url, &target, "").await })
+            let results: Vec<Result<u64, String>> = stream::iter(asset_downloads)
+                .map(|(url, target, size)| {
+                    let tracker = tracker.clone();
+                    async move { download_file_tracked(app, &tracker, client, &url, &target, "", size).await }
+                })
                 .buffer_unordered(24)
                 .collect()
                 .await;
@@ -487,7 +503,8 @@ pub async fn resolve_or_install_java(
         },
     );
 
-    download_file(client, &download_url, &archive_path, "").await?;
+    let java_tracker = DownloadTracker::new(0);
+    download_file_tracked(app, &java_tracker, client, &download_url, &archive_path, "", 0).await?;
 
     let _ = app.emit(
         "download-progress",
@@ -605,6 +622,7 @@ async fn ensure_fabric_installed(
     }
 
     if !lib_downloads.is_empty() {
+        let tracker = DownloadTracker::new(0);
         let _ = app.emit(
             "download-progress",
             ProgressPayload {
@@ -613,18 +631,21 @@ async fn ensure_fabric_installed(
                 log: Some(format!("Загрузка {} библиотек Fabric...", lib_downloads.len())),
             },
         );
-        let results: Vec<Result<(), String>> = stream::iter(lib_downloads)
-            .map(|(base_url, rel_path, target)| async move {
-                let primary_url = format!("{}{}", base_url, rel_path);
-                if download_file(client, &primary_url, &target, "").await.is_ok() {
-                    return Ok(());
+        let results: Vec<Result<u64, String>> = stream::iter(lib_downloads)
+            .map(|(base_url, rel_path, target)| {
+                let tracker = tracker.clone();
+                async move {
+                    let primary_url = format!("{}{}", base_url, rel_path);
+                    if let Ok(n) = download_file_tracked(app, &tracker, client, &primary_url, &target, "", 0).await {
+                        return Ok(n);
+                    }
+                    let mc_fallback = format!("https://libraries.minecraft.net/{}", rel_path);
+                    if let Ok(n) = download_file_tracked(app, &tracker, client, &mc_fallback, &target, "", 0).await {
+                        return Ok(n);
+                    }
+                    let maven_fallback = format!("https://repo1.maven.org/maven2/{}", rel_path);
+                    download_file_tracked(app, &tracker, client, &maven_fallback, &target, "", 0).await
                 }
-                let mc_fallback = format!("https://libraries.minecraft.net/{}", rel_path);
-                if download_file(client, &mc_fallback, &target, "").await.is_ok() {
-                    return Ok(());
-                }
-                let maven_fallback = format!("https://repo1.maven.org/maven2/{}", rel_path);
-                download_file(client, &maven_fallback, &target, "").await
             })
             .buffer_unordered(12)
             .collect()
@@ -706,7 +727,8 @@ pub async fn ensure_loader_installed(
     );
 
     let installer_path = game_dir.join("neoforge-installer.jar");
-    download_file(client, &installer_url, &installer_path, "").await?;
+    let nf_tracker = DownloadTracker::new(0);
+    download_file_tracked(app, &nf_tracker, client, &installer_url, &installer_path, "", 0).await?;
 
     let _ = app.emit(
         "download-progress",
@@ -751,7 +773,7 @@ async fn download_authlib_from_meta(
 ) -> Result<(), String> {
     let resp = client
         .get(meta_url)
-        .header("User-Agent", "AstralForge-Launcher/1.0")
+        .header("User-Agent", "Eternum-Launcher/1.0")
         .send()
         .await
         .map_err(|e| format!("Ошибка запроса к {}: {}", meta_url, e))?;
@@ -780,7 +802,7 @@ async fn download_authlib_from_github(
 ) -> Result<(), String> {
     let resp = client
         .get(AUTHLIB_INJECTOR_GITHUB_API_URL)
-        .header("User-Agent", "AstralForge-Launcher/1.0")
+        .header("User-Agent", "Eternum-Launcher/1.0")
         .send()
         .await
         .map_err(|e| format!("Ошибка запроса к {}: {}", AUTHLIB_INJECTOR_GITHUB_API_URL, e))?;

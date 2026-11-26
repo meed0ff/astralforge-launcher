@@ -51,7 +51,7 @@ async fn fetch_elyby_skin(username: String) -> Result<String, String> {
         urlencoding::encode(&username)
     );
     let client = reqwest::Client::builder()
-        .user_agent("AstralForge-Launcher/1.0")
+        .user_agent("Eternum-Launcher/1.0")
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -72,12 +72,16 @@ pub struct ManifestSummary {
     pub loader_type: String,
     pub loader_version: String,
     pub files_count: usize,
+    pub total_pack_bytes: u64,
+    pub needed_bytes: u64,
+    pub free_disk_bytes: Option<u64>,
+    pub enough_disk_space: Option<bool>,
 }
 
 #[tauri::command]
 async fn fetch_manifest_info(manifest_url: String) -> Result<ManifestSummary, String> {
     let client = reqwest::Client::builder()
-        .user_agent("AstralForge-Launcher/1.0")
+        .user_agent("Eternum-Launcher/1.0")
         .build()
         .map_err(|e| e.to_string())?;
     let resp = client
@@ -92,6 +96,12 @@ async fn fetch_manifest_info(manifest_url: String) -> Result<ManifestSummary, St
         .json()
         .await
         .map_err(|e| format!("Ошибка разбора манифеста: {}", e))?;
+
+    let game_dir = game_launcher::get_game_dir();
+    let (total_pack_bytes, needed_bytes) = downloader::estimate_sync_sizes(&game_dir, &manifest.files);
+    let free_disk_bytes = downloader::get_available_disk_space(&game_dir);
+    let enough_disk_space = free_disk_bytes.map(|free| free >= needed_bytes);
+
     Ok(ManifestSummary {
         pack_version: manifest.pack_version,
         server_name: manifest.server.name,
@@ -100,6 +110,10 @@ async fn fetch_manifest_info(manifest_url: String) -> Result<ManifestSummary, St
         loader_type: manifest.loader.loader_type,
         loader_version: manifest.loader.version,
         files_count: manifest.files.len(),
+        total_pack_bytes,
+        needed_bytes,
+        free_disk_bytes,
+        enough_disk_space,
     })
 }
 
@@ -126,7 +140,7 @@ async fn start_sync_and_launch(
     }
 
     let client = reqwest::Client::builder()
-        .user_agent("AstralForge-Launcher/1.0")
+        .user_agent("Eternum-Launcher/1.0")
         .build()
         .map_err(|e| e.to_string())?;
 

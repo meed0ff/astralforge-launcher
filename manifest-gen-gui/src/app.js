@@ -9,6 +9,20 @@ const configStatusEl = document.getElementById("config-status");
 const badgeMods = document.getElementById("badge-mods");
 const badgeExtra = document.getElementById("badge-extra");
 const badgeBundles = document.getElementById("badge-bundles");
+const badgeSync = document.getElementById("badge-sync");
+const packSizeInfo = document.getElementById("pack-size-info");
+const neededSizeInfo = document.getElementById("needed-size-info");
+const diskFreeInfo = document.getElementById("disk-free-info");
+const btnDownloadRepo = document.getElementById("btn-download-repo");
+
+const updateLockBanner = document.getElementById("update-lock-banner");
+const updateCommitBadge = document.getElementById("update-commit-badge");
+const updateLockDesc = document.getElementById("update-lock-desc");
+const updateLockMeta = document.getElementById("update-lock-meta");
+const btnPullUpdate = document.getElementById("btn-pull-update");
+const btnRecheckSync = document.getElementById("btn-recheck-sync");
+const cardParams = document.getElementById("card-params");
+const actionCard = document.querySelector(".action-card");
 
 const loaderBtns = Array.from(document.querySelectorAll(".loader-btn"));
 const customLoaderRow = document.getElementById("custom-loader-row");
@@ -46,6 +60,9 @@ const progressWrap = document.getElementById("progress-wrap");
 const progressStatus = document.getElementById("progress-status");
 const progressPercent = document.getElementById("progress-percent");
 const progressFill = document.getElementById("progress-fill");
+const progressDetails = document.getElementById("progress-details");
+const progressBytes = document.getElementById("progress-bytes");
+const progressSpeed = document.getElementById("progress-speed");
 
 const statModrinth = document.getElementById("stat-modrinth");
 const statGithub = document.getElementById("stat-github");
@@ -58,6 +75,209 @@ let selectedLoader = "neoforge";
 let cachedBundlesMap = {};
 let fetchedVersions = [];
 let versionRequestSeq = 0;
+let isManagementLocked = false;
+let syncCheckSeq = 0;
+
+function formatBytes(bytes) {
+  if (bytes == null || Number.isNaN(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} Б`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} КБ`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} МБ`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} ГБ`;
+}
+
+function formatSpeed(bps) {
+  if (!bps || bps <= 0) return "0 КБ/с";
+  return `${formatBytes(bps)}/с`;
+}
+
+function applyStorageMetrics(totalPackBytes, neededBytes, freeDiskBytes, enoughDiskSpace) {
+  if (packSizeInfo && totalPackBytes != null) {
+    packSizeInfo.textContent = `Вес сборки: ${formatBytes(totalPackBytes)}`;
+  }
+  if (neededSizeInfo) {
+    if (neededBytes == null) {
+      neededSizeInfo.textContent = "Нужно скачать: —";
+      neededSizeInfo.className = "storage-chip";
+    } else if (neededBytes === 0) {
+      neededSizeInfo.textContent = "Нужно скачать: 0 Б (актуально)";
+      neededSizeInfo.className = "storage-chip ok";
+    } else {
+      neededSizeInfo.textContent = `Нужно скачать: ${formatBytes(neededBytes)}`;
+      neededSizeInfo.className = "storage-chip warn";
+    }
+  }
+  if (diskFreeInfo) {
+    if (freeDiskBytes == null) {
+      diskFreeInfo.textContent = "Свободно на диске: —";
+      diskFreeInfo.className = "storage-chip";
+    } else if (enoughDiskSpace === false) {
+      diskFreeInfo.textContent = `Свободно на диске: ${formatBytes(freeDiskBytes)} (мало места!)`;
+      diskFreeInfo.className = "storage-chip err";
+    } else if (enoughDiskSpace === true) {
+      diskFreeInfo.textContent = `Свободно на диске: ${formatBytes(freeDiskBytes)}`;
+      diskFreeInfo.className = "storage-chip ok";
+    } else {
+      diskFreeInfo.textContent = `Свободно на диске: ${formatBytes(freeDiskBytes)}`;
+      diskFreeInfo.className = "storage-chip";
+    }
+  }
+}
+
+function setManagementLocked(locked) {
+  isManagementLocked = locked;
+  if (actionCard) {
+    actionCard.classList.toggle("locked-section", locked);
+  }
+  btnGenerate.disabled = locked;
+  btnGeneratePublish.disabled = locked;
+  btnBumpVersion.disabled = locked;
+  btnFetchVersions.disabled = locked;
+  mcVersionInput.disabled = locked;
+  loaderVersionInput.disabled = locked;
+  packVersionInput.disabled = locked;
+  serverNameInput.disabled = locked;
+  serverIpInput.disabled = locked;
+  customLoaderInput.disabled = locked;
+  for (const btn of loaderBtns) {
+    btn.disabled = locked;
+  }
+  for (const chip of mcChips) {
+    chip.disabled = locked;
+  }
+}
+
+async function checkRemoteSync() {
+  if (!hasTauri) return;
+  const seq = ++syncCheckSeq;
+  const dir = modpackDirInput.value.trim();
+  const owner = repoOwnerInput.value.trim() || "meed0ff";
+  const repo = repoNameInput.value.trim() || "eternum-modpack";
+  const branch = repoBranchInput.value.trim() || "main";
+  const token = githubTokenInput.value.trim();
+
+  if (badgeSync) {
+    badgeSync.textContent = "GitHub: проверка...";
+    badgeSync.className = "pill sync-pill";
+  }
+
+  try {
+    const res = await window.__TAURI__.core.invoke("check_remote_sync", {
+      dir,
+      owner,
+      repo,
+      branch,
+      token
+    });
+    if (seq !== syncCheckSeq) return;
+
+    applyStorageMetrics(
+      res.total_pack_bytes,
+      res.needed_bytes,
+      res.free_disk_bytes,
+      res.enough_disk_space
+    );
+
+    if (res.status === "up_to_date") {
+      badgeSync.textContent = `✓ GitHub: актуально (${(res.remote_sha || "").slice(0, 7)})`;
+      badgeSync.className = "pill sync-pill ok";
+      updateLockBanner.classList.add("hidden");
+      setManagementLocked(false);
+    } else if (res.status === "update_required") {
+      const shortRemote = (res.remote_sha || "").slice(0, 7) || "update";
+      badgeSync.textContent = `⚠ GitHub: есть обнова (${shortRemote})`;
+      badgeSync.className = "pill sync-pill warn";
+      updateCommitBadge.textContent = res.local_sha
+        ? `${res.local_sha.slice(0, 7)} → ${shortRemote}`
+        : `Коммит ${shortRemote}`;
+      updateLockDesc.textContent = res.message;
+
+      const metaParts = [];
+      if (res.remote_message) metaParts.push(`Коммит: ${res.remote_message}`);
+      if (res.remote_author) metaParts.push(`Автор: ${res.remote_author}`);
+      if (res.total_pack_bytes != null) metaParts.push(`Вес сборки: ${formatBytes(res.total_pack_bytes)}`);
+      if (res.needed_bytes != null) metaParts.push(`Скачать: ${formatBytes(res.needed_bytes)}`);
+      if (res.free_disk_bytes != null) metaParts.push(`Свободно: ${formatBytes(res.free_disk_bytes)}`);
+      if (res.enough_disk_space === false) metaParts.push("⚠ Недостаточно места на диске!");
+      if (metaParts.length > 0) {
+        updateLockMeta.textContent = metaParts.join("  •  ");
+        updateLockMeta.classList.remove("hidden");
+      } else {
+        updateLockMeta.classList.add("hidden");
+      }
+
+      updateLockBanner.classList.remove("hidden");
+      setManagementLocked(true);
+      addLog(`🔒 Обнаружено обновление на GitHub (${shortRemote}). Управление заблокировано до скачивания.`, "error");
+    } else if (res.status === "uninitialized") {
+      badgeSync.textContent = "GitHub: новая репа";
+      badgeSync.className = "pill sync-pill";
+      updateLockBanner.classList.add("hidden");
+      setManagementLocked(false);
+    } else {
+      badgeSync.textContent = "GitHub: не проверено";
+      badgeSync.className = "pill sync-pill err";
+      updateLockBanner.classList.add("hidden");
+      setManagementLocked(false);
+      addLog(`Проверка обновлений GitHub: ${res.message}`, "info");
+    }
+  } catch (err) {
+    if (seq !== syncCheckSeq) return;
+    badgeSync.textContent = "GitHub: ошибка";
+    badgeSync.className = "pill sync-pill err";
+    updateLockBanner.classList.add("hidden");
+    setManagementLocked(false);
+    addLog(`Ошибка проверки обновлений: ${err}`, "error");
+  }
+}
+
+async function downloadFromGithub() {
+  if (!hasTauri) return;
+  const dir = modpackDirInput.value.trim();
+  if (!dir) {
+    showToast("Укажите папку, куда скачать сборку.", "error");
+    return;
+  }
+  const owner = repoOwnerInput.value.trim() || "meed0ff";
+  const repo = repoNameInput.value.trim() || "eternum-modpack";
+  const branch = repoBranchInput.value.trim() || "main";
+  const token = githubTokenInput.value.trim();
+
+  btnDownloadRepo.disabled = true;
+  btnPullUpdate.disabled = true;
+  btnRecheckSync.disabled = true;
+  progressWrap.classList.remove("hidden");
+  if (progressDetails) progressDetails.classList.add("hidden");
+  progressFill.style.width = "5%";
+  progressPercent.textContent = "5%";
+  progressStatus.textContent = `Скачивание сборки из ${owner}/${repo}...`;
+  logBox.innerHTML = "";
+
+  try {
+    const res = await window.__TAURI__.core.invoke("download_modpack_from_github", {
+      dir,
+      owner,
+      repo,
+      branch,
+      token
+    });
+    showToast(
+      `Сборка скачана (${res.commit_sha.slice(0, 7)})! GitHub: ${res.downloaded_github}, Modrinth: ${res.downloaded_modrinth}, кэш: ${res.skipped_cached}`,
+      "success"
+    );
+    await loadFolderOverview(dir);
+  } catch (err) {
+    addLog(`Ошибка скачивания сборки: ${err}`, "error");
+    showToast(`Ошибка скачивания: ${err}`, "error");
+  } finally {
+    btnDownloadRepo.disabled = false;
+    btnPullUpdate.disabled = false;
+    btnRecheckSync.disabled = false;
+  }
+}
 
 function showToast(msg, type = "info") {
   const el = document.createElement("div");
@@ -131,6 +351,7 @@ async function loadFolderOverview(dir) {
     badgeMods.textContent = `Модов: ${data.mods_count}`;
     badgeExtra.textContent = `Доп. файлов: ${data.extra_count}`;
     badgeBundles.textContent = `Бандлов: ${data.bundles_count}`;
+    applyStorageMetrics(data.local_size_bytes, null, data.free_disk_bytes, null);
 
     if (data.has_config) {
       configStatusEl.textContent = "✓ Найден repo_config.json — текущие параметры загружены.";
@@ -151,6 +372,8 @@ async function loadFolderOverview(dir) {
     repoOwnerInput.value = c.repo_owner || "meed0ff";
     repoNameInput.value = c.repo_name || "eternum-modpack";
     repoBranchInput.value = c.branch || "main";
+
+    await checkRemoteSync();
   } catch (err) {
     configStatusEl.textContent = `Ошибка: ${err}`;
     configStatusEl.className = "hint-text";
@@ -375,6 +598,7 @@ btnCheckGithub.addEventListener("click", async () => {
       githubStatusEl.className = "hint-text warn";
       showToast("У этого токена нет прав на запись в репозиторий.", "error");
     }
+    await checkRemoteSync();
   } catch (err) {
     githubStatusEl.textContent = `❌ ${err}`;
     githubStatusEl.className = "hint-text";
@@ -387,6 +611,10 @@ btnCheckGithub.addEventListener("click", async () => {
 
 async function runGenerateAndOptionallyPublish(andPublish) {
   if (!hasTauri) return;
+  if (isManagementLocked) {
+    showToast("Сначала скачайте обновление сборки с GitHub!", "error");
+    return;
+  }
   const token = githubTokenInput.value.trim();
   if (andPublish && !token) {
     showToast("Вставьте GitHub токен в раздел «Доступ для загрузки на GitHub».", "error");
@@ -411,6 +639,7 @@ async function runGenerateAndOptionallyPublish(andPublish) {
   btnGenerate.disabled = true;
   btnGeneratePublish.disabled = true;
   progressWrap.classList.remove("hidden");
+  if (progressDetails) progressDetails.classList.add("hidden");
   progressFill.style.width = "5%";
   progressPercent.textContent = "5%";
   progressStatus.textContent = "Запуск генерации...";
@@ -453,6 +682,12 @@ async function runGenerateAndOptionallyPublish(andPublish) {
 
 btnGenerate.addEventListener("click", () => runGenerateAndOptionallyPublish(false));
 btnGeneratePublish.addEventListener("click", () => runGenerateAndOptionallyPublish(true));
+btnDownloadRepo.addEventListener("click", downloadFromGithub);
+btnPullUpdate.addEventListener("click", downloadFromGithub);
+btnRecheckSync.addEventListener("click", checkRemoteSync);
+repoOwnerInput.addEventListener("change", checkRemoteSync);
+repoNameInput.addEventListener("change", checkRemoteSync);
+repoBranchInput.addEventListener("change", checkRemoteSync);
 
 async function initApp() {
   if (!hasTauri) return;
@@ -464,8 +699,28 @@ async function initApp() {
       progressFill.style.width = `${p.percent}%`;
       progressPercent.textContent = `${p.percent}%`;
       progressStatus.textContent = p.status;
+      if (p.percent === 100 && progressDetails) {
+        progressDetails.classList.add("hidden");
+      }
       if (p.log) {
         addLog(p.log, p.percent === 100 ? "success" : "info");
+      }
+    });
+
+    window.__TAURI__.event.listen("download-stats", (event) => {
+      const s = event.payload;
+      if (!progressDetails) return;
+      progressWrap.classList.remove("hidden");
+      progressDetails.classList.remove("hidden");
+      if (progressBytes) {
+        const filePart = `Файл: ${formatBytes(s.file_downloaded)} / ${formatBytes(s.file_total)}`;
+        const totalPart = s.total_bytes > 0
+          ? ` • Всего: ${formatBytes(s.total_downloaded)} / ${formatBytes(s.total_bytes)}`
+          : "";
+        progressBytes.textContent = filePart + totalPart;
+      }
+      if (progressSpeed) {
+        progressSpeed.textContent = `⚡ ${formatSpeed(s.speed_bps)}`;
       }
     });
   }

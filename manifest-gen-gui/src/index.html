@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Eternum — Генератор манифеста</title>
+  <title>Eternum — Управление сборкой</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
     <div class="brand">
       <img src="logo.webp" alt="Eternum" class="brand-logo" />
       <span class="brand-title">ETER<span class="accent">NUM</span></span>
-      <span class="brand-badge">Генератор манифеста</span>
+      <span class="brand-badge">Управление сборкой</span>
     </div>
     <button type="button" id="btn-open-folder" class="header-btn">📁 Открыть папку</button>
   </header>
@@ -25,18 +25,41 @@
           <span class="pill" id="badge-mods">Модов: —</span>
           <span class="pill" id="badge-extra">Доп. файлов: —</span>
           <span class="pill" id="badge-bundles">Бандлов: —</span>
+          <span class="pill sync-pill" id="badge-sync">GitHub: проверка...</span>
         </div>
       </div>
       <div class="folder-row">
         <input type="text" id="modpack-dir" placeholder="Путь к папке сборки (где лежат mods/ и repo_config.json)" />
         <button type="button" id="btn-browse" class="btn-secondary">📂 Обзор...</button>
-        <button type="button" id="btn-refresh" class="btn-secondary icon-only" title="Пересканировать папку">🔄</button>
+        <button type="button" id="btn-refresh" class="btn-secondary icon-only" title="Пересканировать папку и проверить обновления">🔄</button>
+        <button type="button" id="btn-download-repo" class="btn-secondary btn-download-repo" title="Скачать сборку с GitHub в выбранную папку">⬇ Скачать из репы</button>
       </div>
       <div class="hint-text" id="config-status">Определение папки...</div>
+      <div class="storage-meta-row" id="storage-meta-row">
+        <span class="storage-chip" id="pack-size-info">Вес сборки: —</span>
+        <span class="storage-chip" id="needed-size-info">Нужно скачать: —</span>
+        <span class="storage-chip" id="disk-free-info">Свободно на диске: —</span>
+      </div>
+    </section>
+
+    <!-- Блокирующий баннер при наличии обновления на GitHub -->
+    <section class="update-lock-banner hidden" id="update-lock-banner">
+      <div class="update-lock-header">
+        <span class="update-lock-title">🔒 На GitHub вышло обновление сборки — требуется скачивание</span>
+        <span class="pill warn-pill" id="update-commit-badge">Новый коммит</span>
+      </div>
+      <p class="update-lock-desc" id="update-lock-desc">
+        Сборка была обновлена на другом устройстве. Чтобы не перезаписать чужие изменения, управление сборкой заблокировано до скачивания обновления.
+      </p>
+      <div class="update-lock-meta hidden" id="update-lock-meta"></div>
+      <div class="update-lock-actions">
+        <button type="button" id="btn-pull-update" class="btn-pull-update">⬇ Скачать обновление и разблокировать</button>
+        <button type="button" id="btn-recheck-sync" class="btn-secondary">🔄 Проверить снова</button>
+      </div>
     </section>
 
     <!-- Настройки ядра и версии -->
-    <section class="card">
+    <section class="card" id="card-params">
       <div class="card-title-row">
         <span class="card-title">2. Параметры сборки и ядра</span>
       </div>
@@ -123,7 +146,7 @@
           <ol>
             <li>На GitHub откройте <code>meed0ff/eternum-modpack</code> → <b>Settings → Collaborators → Add people</b> и добавьте её аккаунт с правами <b>Write</b>.</li>
             <li>Она создаёт у себя <b>Fine-grained token</b> (<code>github.com/settings/tokens?type=beta</code>) с доступом <b>Only select repositories → eternum-modpack</b> и правом <b>Contents: Read and write</b> (или вы создаёте такой токен только для этого репозитория и передаёте ей).</li>
-            <li>Она вставляет токен в поле выше — программа запоминает его локально в <code>%APPDATA%</code> и больше не спрашивает.</li>
+            <li>Она вставляет токен в поле выше — программа запоминает его локально и больше не спрашивает.</li>
           </ol>
         </div>
 
@@ -170,10 +193,14 @@
         <div class="progress-bg">
           <div class="progress-fill" id="progress-fill"></div>
         </div>
+        <div class="progress-details hidden" id="progress-details">
+          <span id="progress-bytes"></span>
+          <span id="progress-speed"></span>
+        </div>
       </div>
 
       <div class="log-box" id="log-box">
-        <div class="log-line info">Готов к работе. Выберите параметры и нажмите «Сгенерировать manifest.json».</div>
+        <div class="log-line info">Готов к работе. Выберите папку сборки или скачайте её из GitHub-репозитория.</div>
       </div>
     </section>
   </main>

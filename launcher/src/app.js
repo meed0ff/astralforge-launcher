@@ -42,6 +42,25 @@ const progressContainer = document.getElementById("progress-container");
 const progressFill = document.getElementById("progress-fill");
 const progressStatus = document.getElementById("progress-status");
 const progressPercent = document.getElementById("progress-percent");
+const progressDetails = document.getElementById("progress-details");
+const progressBytes = document.getElementById("progress-bytes");
+const progressSpeed = document.getElementById("progress-speed");
+
+function formatBytes(bytes) {
+  if (bytes == null || Number.isNaN(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} Б`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} КБ`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} МБ`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} ГБ`;
+}
+
+function formatSpeed(bps) {
+  if (!bps || bps <= 0) return "0 КБ/с";
+  return `${formatBytes(bps)}/с`;
+}
 
 const btnLogsToggle = document.getElementById("btn-logs-toggle");
 const btnLogsClose = document.getElementById("btn-logs-close");
@@ -258,7 +277,7 @@ btnOpenGameFolder.addEventListener("click", () => {
       showToast(`Не удалось открыть папку: ${err}`, "error");
     });
   } else {
-    showToast("Папка игры: ~/.astralforge", "info");
+    showToast("Папка игры: ~/.eternum", "info");
   }
 });
 
@@ -430,9 +449,17 @@ function refreshManifestMetadata() {
     .then((info) => {
       const loaderLabel = info.loader_type.charAt(0).toUpperCase() + info.loader_type.slice(1);
       if (versionBadgeEl) {
+        const sizeLabel = info.total_pack_bytes ? ` · ${formatBytes(info.total_pack_bytes)}` : "";
         versionBadgeEl.textContent = info.pack_version
-          ? `${info.minecraft_version} ${loaderLabel} · ${info.pack_version}`
-          : `${info.minecraft_version} ${loaderLabel}`;
+          ? `${info.minecraft_version} ${loaderLabel} · ${info.pack_version}${sizeLabel}`
+          : `${info.minecraft_version} ${loaderLabel}${sizeLabel}`;
+      }
+      if (info.total_pack_bytes != null) {
+        const freePart = info.free_disk_bytes != null ? `, свободно: ${formatBytes(info.free_disk_bytes)}` : "";
+        addLog(`Сборка: ${formatBytes(info.total_pack_bytes)}, нужно скачать: ${formatBytes(info.needed_bytes || 0)}${freePart}`);
+        if (info.enough_disk_space === false) {
+          addLog(`⚠ Недостаточно свободного места на диске! Нужно ${formatBytes(info.needed_bytes)}, доступно ${formatBytes(info.free_disk_bytes)}`, "error");
+        }
       }
       if (serverTitleEl && info.server_name) {
         serverTitleEl.textContent = info.server_name;
@@ -501,8 +528,28 @@ function initLauncher() {
     window.__TAURI__.event.listen("download-progress", (event) => {
       const payload = event.payload;
       setProgress(payload.percent, payload.status);
+      if (payload.percent >= 95 && progressDetails) {
+        progressDetails.classList.add("hidden");
+      }
       if (payload.log) {
         addLog(payload.log);
+      }
+    });
+
+    window.__TAURI__.event.listen("download-stats", (event) => {
+      const s = event.payload;
+      if (!progressDetails) return;
+      progressContainer.style.display = "block";
+      progressDetails.classList.remove("hidden");
+      if (progressBytes) {
+        const filePart = `Файл: ${formatBytes(s.file_downloaded)} / ${formatBytes(s.file_total)}`;
+        const totalPart = s.total_bytes > 0
+          ? ` • Всего: ${formatBytes(s.total_downloaded)} / ${formatBytes(s.total_bytes)}`
+          : "";
+        progressBytes.textContent = filePart + totalPart;
+      }
+      if (progressSpeed) {
+        progressSpeed.textContent = `⚡ ${formatSpeed(s.speed_bps)}`;
       }
     });
 

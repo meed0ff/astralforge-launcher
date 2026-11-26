@@ -704,6 +704,22 @@ body {
   display: none !important;
 }
 
+.progress-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: #cbd5e1;
+}
+
+.progress-details #progress-speed {
+  color: #67e8f9;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* Toast Notifications */
 .toast-container {
   position: fixed;

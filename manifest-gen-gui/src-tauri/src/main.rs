@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine as _;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::Sha1;
@@ -9,12 +10,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const CONFIG_FILE: &str = "repo_config.json";
 const MANIFEST_FILE: &str = "manifest.json";
+const SYNC_STATE_FILE: &str = ".eternum-sync.json";
 const MODRINTH_API: &str = "https://api.modrinth.com/v2/version_files";
-const USER_AGENT: &str = "Eternum-ManifestGen/1.0";
+const USER_AGENT: &str = "Eternum-ModpackManager/1.0";
 
 const EXTRA_DIRS: &[&str] = &[
     "config",
@@ -103,6 +106,8 @@ pub struct ModpackOverview {
     pub mods_count: usize,
     pub extra_count: usize,
     pub bundles_count: usize,
+    pub local_size_bytes: u64,
+    pub free_disk_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +115,16 @@ pub struct GenProgress {
     pub percent: u32,
     pub status: String,
     pub log: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadStats {
+    pub file_name: Option<String>,
+    pub file_downloaded: u64,
+    pub file_total: u64,
+    pub total_downloaded: u64,
+    pub total_bytes: u64,
+    pub speed_bps: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +152,42 @@ pub struct PublishSummary {
     pub removed_count: usize,
     pub no_changes: bool,
     pub repo_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncState {
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub branch: String,
+    pub commit_sha: String,
+    #[serde(default)]
+    pub pack_version: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncCheckResult {
+    pub status: String,
+    pub local_sha: Option<String>,
+    pub remote_sha: Option<String>,
+    pub remote_message: Option<String>,
+    pub remote_author: Option<String>,
+    pub remote_date: Option<String>,
+    pub message: String,
+    pub total_pack_bytes: Option<u64>,
+    pub needed_bytes: Option<u64>,
+    pub free_disk_bytes: Option<u64>,
+    pub enough_disk_space: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownloadSummary {
+    pub dir: String,
+    pub commit_sha: String,
+    pub pack_version: String,
+    pub downloaded_github: usize,
+    pub downloaded_modrinth: usize,
+    pub skipped_cached: usize,
+    pub removed_stale: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -371,10 +422,103 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        let mut init = initial_dir.trim().to_string();
+        if !init.is_empty() && !init.ends_with('/') {
+            init.push('/');
+        }
+
+        let selected = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+            let mut zenity = std::process::Command::new("zenity");
+            zenity.args([
+                "--file-selection",
+                "--directory",
+                "--title=Выберите папку сборки (mods/ и repo_config.json)",
+            ]);
+            if !init.is_empty() && Path::new(init.trim_end_matches('/')).exists() {
+                zenity.arg(format!("--filename={}", init));
+            }
+
+            match zenity.output() {
+                Ok(out) => {
+                    if out.status.success() {
+                        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        return Ok(if path.is_empty() { None } else { Some(path) });
+                    }
+                    // Exit code 1 or 5 means user cancelled / closed dialog
+                    if matches!(out.status.code(), Some(1) | Some(5)) {
+                        return Ok(None);
+                    }
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    Err(format!("Ошибка zenity: {}", err))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let mut kdialog = std::process::Command::new("kdialog");
+                    kdialog.arg("--getexistingdirectory");
+                    if !init.is_empty() && Path::new(init.trim_end_matches('/')).exists() {
+                        kdialog.arg(init.trim_end_matches('/'));
+                    } else {
+                        kdialog.arg(".");
+                    }
+                    kdialog.args(["--title", "Выберите папку сборки (mods/ и repo_config.json)"]);
+
+                    match kdialog.output() {
+                        Ok(out) => {
+                            if out.status.success() {
+                                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                Ok(if path.is_empty() { None } else { Some(path) })
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                        Err(_) => Err(
+                            "Не найден zenity или kdialog. Установите zenity или укажите путь к папке вручную."
+                                .into(),
+                        ),
+                    }
+                }
+                Err(e) => Err(format!("Не удалось запустить zenity: {}", e)),
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        Ok(selected)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let selected = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+            let script = if !initial_dir.trim().is_empty() && Path::new(initial_dir.trim()).exists() {
+                format!(
+                    "POSIX path of (choose folder with prompt \"Выберите папку сборки\" default location POSIX file \"{}\")",
+                    initial_dir.trim().replace('"', "\\\"")
+                )
+            } else {
+                "POSIX path of (choose folder with prompt \"Выберите папку сборки\")".to_string()
+            };
+            let out = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output()
+                .map_err(|e| format!("Не удалось открыть Finder: {}", e))?;
+            if out.status.success() {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                Ok(if path.is_empty() { None } else { Some(path) })
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        Ok(selected)
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = initial_dir;
-        Err("Выбор папки через проводник поддерживается только на Windows.".into())
+        Err("Выбор папки через проводник не поддерживается на этой ОС.".into())
     }
 }
 
@@ -383,6 +527,108 @@ fn open_folder(dir: String) -> Result<(), String> {
     let path = PathBuf::from(dir);
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     open::that(&path).map_err(|e| e.to_string())
+}
+
+fn get_available_disk_space(path: &Path) -> Option<u64> {
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        if !probe.pop() {
+            break;
+        }
+    }
+    if !probe.exists() {
+        probe = PathBuf::from(".");
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = CString::new(probe.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if rc == 0 {
+            return Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64));
+        }
+        None
+    }
+    #[cfg(windows)]
+    {
+        let probe_str = probe.to_string_lossy().replace('\'', "''");
+        let script = format!("(Get-Item -LiteralPath '{}').PSDrive.Free", probe_str);
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let txt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return txt.parse::<u64>().ok();
+        }
+        None
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+fn format_bytes_ru(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b < KB {
+        format!("{} Б", bytes)
+    } else if b < MB {
+        format!("{:.1} КБ", b / KB)
+    } else if b < GB {
+        format!("{:.1} МБ", b / MB)
+    } else {
+        format!("{:.2} ГБ", b / GB)
+    }
+}
+
+fn compute_local_pack_size(base_dir: &Path) -> Result<u64, String> {
+    let mut total: u64 = 0;
+    let mods_dir = base_dir.join("mods");
+    if mods_dir.is_dir() {
+        for entry in fs::read_dir(&mods_dir).map_err(|e| e.to_string())?.flatten() {
+            let p = entry.path();
+            if p.is_file()
+                && p.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
+            {
+                total += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    for folder in EXTRA_DIRS {
+        let mut files = Vec::new();
+        collect_files_recursive(&base_dir.join(folder), &mut files)?;
+        for f in files {
+            total += fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    for root_file in EXTRA_ROOT_FILES {
+        let p = base_dir.join(root_file);
+        if p.is_file() {
+            total += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    let bundles_dir = base_dir.join("bundles");
+    if bundles_dir.is_dir() {
+        for entry in fs::read_dir(&bundles_dir).map_err(|e| e.to_string())?.flatten() {
+            let p = entry.path();
+            if p.is_file()
+                && p.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+            {
+                total += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    Ok(total)
 }
 
 #[tauri::command]
@@ -447,6 +693,9 @@ fn inspect_modpack_dir(dir: String) -> Result<ModpackOverview, String> {
         0
     };
 
+    let local_size_bytes = compute_local_pack_size(&base_dir)?;
+    let free_disk_bytes = get_available_disk_space(&base_dir);
+
     Ok(ModpackOverview {
         dir: base_dir.to_string_lossy().to_string(),
         has_config,
@@ -454,6 +703,8 @@ fn inspect_modpack_dir(dir: String) -> Result<ModpackOverview, String> {
         mods_count,
         extra_count,
         bundles_count,
+        local_size_bytes,
+        free_disk_bytes,
     })
 }
 
@@ -964,6 +1215,948 @@ fn save_github_token(token: String) -> Result<(), String> {
     fs::write(&path, trimmed).map_err(|e| format!("Не удалось сохранить токен: {}", e))
 }
 
+fn github_client_optional(token: &str) -> Result<reqwest::Client, String> {
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
+    let mut headers = HeaderMap::new();
+    let trimmed = token.trim();
+    if !trimmed.is_empty() {
+        let auth_val = HeaderValue::from_str(&format!("Bearer {}", trimmed))
+            .map_err(|_| "Некорректные символы в GitHub токене.".to_string())?;
+        headers.insert(AUTHORIZATION, auth_val);
+    }
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        "X-GitHub-Api-Version",
+        HeaderValue::from_static("2022-11-28"),
+    );
+
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .default_headers(headers)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn read_sync_state(base_dir: &Path) -> Option<SyncState> {
+    let path = base_dir.join(SYNC_STATE_FILE);
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<SyncState>(&raw).ok()
+}
+
+fn write_sync_state(base_dir: &Path, state: &SyncState) -> Result<(), String> {
+    let path = base_dir.join(SYNC_STATE_FILE);
+    let pretty = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{}\n", pretty))
+        .map_err(|e| format!("Не удалось сохранить состояние синхронизации: {}", e))
+}
+
+struct RemoteHeadInfo {
+    commit_sha: String,
+    tree_sha: String,
+    message: String,
+    author: String,
+    date: String,
+}
+
+async fn fetch_remote_head_info(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<RemoteHeadInfo, String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/commits/{}",
+        owner.trim(),
+        repo.trim(),
+        urlencoding::encode(branch.trim())
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка соединения с GitHub: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(map_github_http_error(status, &body, owner, repo));
+    }
+
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let commit_sha = json["sha"]
+        .as_str()
+        .ok_or_else(|| "GitHub не вернул SHA последнего коммита.".to_string())?
+        .to_string();
+    let tree_sha = json["commit"]["tree"]["sha"]
+        .as_str()
+        .ok_or_else(|| "GitHub не вернул tree SHA коммита.".to_string())?
+        .to_string();
+    let message = json["commit"]["message"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let author = json["commit"]["author"]["name"]
+        .as_str()
+        .or_else(|| json["author"]["login"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let date = json["commit"]["author"]["date"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    Ok(RemoteHeadInfo {
+        commit_sha,
+        tree_sha,
+        message,
+        author,
+        date,
+    })
+}
+
+fn compute_local_manifest_total_size(base_dir: &Path) -> Option<u64> {
+    let manifest_path = base_dir.join(MANIFEST_FILE);
+    if manifest_path.is_file() {
+        if let Ok(raw) = fs::read_to_string(&manifest_path) {
+            if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                if let Some(files) = val["files"].as_array() {
+                    let sum: u64 = files
+                        .iter()
+                        .filter_map(|e| e["size"].as_u64())
+                        .sum();
+                    if sum > 0 {
+                        return Some(sum);
+                    }
+                }
+            }
+        }
+    }
+    compute_local_pack_size(base_dir).ok()
+}
+
+async fn estimate_remote_pack_sizes(
+    client: &reqwest::Client,
+    base_dir: &Path,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+    tree_sha: &str,
+    existing_tree: Option<&Value>,
+) -> Option<(u64, u64)> {
+    let owned_tree;
+    let tree_json = match existing_tree {
+        Some(t) => t,
+        None => {
+            let tree_url = format!(
+                "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+                owner, repo, tree_sha
+            );
+            let resp = client.get(&tree_url).send().await.ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            owned_tree = resp.json::<Value>().await.ok()?;
+            &owned_tree
+        }
+    };
+
+    let items = tree_json["tree"].as_array()?;
+    let mut total_pack_bytes: u64 = 0;
+    let mut needed_bytes: u64 = 0;
+    let mut has_manifest = false;
+
+    for item in items {
+        if item["type"].as_str() != Some("blob") {
+            continue;
+        }
+        let Some(path) = item["path"].as_str() else {
+            continue;
+        };
+        if path == MANIFEST_FILE {
+            has_manifest = true;
+        }
+        if !is_managed_pack_path(path) {
+            continue;
+        }
+        let size = item["size"].as_u64().unwrap_or(0);
+        let remote_sha = item["sha"].as_str().unwrap_or("");
+        total_pack_bytes = total_pack_bytes.saturating_add(size);
+
+        let local_path = base_dir.join(path);
+        let is_cached = if local_path.is_file() {
+            if fs::metadata(&local_path).map(|m| m.len()).unwrap_or(u64::MAX) == size {
+                fs::read(&local_path)
+                    .map(|bytes| compute_git_blob_sha1(&bytes) == remote_sha)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !is_cached {
+            needed_bytes = needed_bytes.saturating_add(size);
+        }
+    }
+
+    if has_manifest {
+        let manifest_url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}",
+            owner, repo, commit_sha, MANIFEST_FILE
+        );
+        if let Ok(resp) = client.get(&manifest_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(manifest_val) = resp.json::<Value>().await {
+                    if let Some(files) = manifest_val["files"].as_array() {
+                        for entry in files {
+                            if entry["source"].as_str() != Some("modrinth") {
+                                continue;
+                            }
+                            let Some(rel_path) = entry["path"].as_str() else {
+                                continue;
+                            };
+                            let size = entry["size"].as_u64().unwrap_or(0);
+                            let expected_sha256 = entry["sha256"].as_str().unwrap_or("");
+                            total_pack_bytes = total_pack_bytes.saturating_add(size);
+
+                            let local_path = base_dir.join(rel_path);
+                            let is_cached = if local_path.is_file() && !expected_sha256.is_empty() {
+                                if fs::metadata(&local_path).map(|m| m.len()).unwrap_or(u64::MAX) == size {
+                                    compute_hashes(&local_path)
+                                        .map(|(sha256, _, _)| sha256.eq_ignore_ascii_case(expected_sha256))
+                                        .unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if !is_cached {
+                                needed_bytes = needed_bytes.saturating_add(size);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some((total_pack_bytes, needed_bytes))
+}
+
+#[tauri::command]
+async fn check_remote_sync(
+    dir: String,
+    owner: String,
+    repo: String,
+    branch: String,
+    token: String,
+) -> Result<SyncCheckResult, String> {
+    let base_dir = PathBuf::from(dir.trim());
+    let free_disk_bytes = get_available_disk_space(&base_dir);
+    let owner = owner.trim();
+    let repo = repo.trim();
+    let branch = branch.trim();
+    if owner.is_empty() || repo.is_empty() || branch.is_empty() {
+        return Ok(SyncCheckResult {
+            status: "uninitialized".into(),
+            local_sha: None,
+            remote_sha: None,
+            remote_message: None,
+            remote_author: None,
+            remote_date: None,
+            message: "Укажите владельца, репозиторий и ветку GitHub.".into(),
+            total_pack_bytes: compute_local_manifest_total_size(&base_dir),
+            needed_bytes: None,
+            free_disk_bytes,
+            enough_disk_space: None,
+        });
+    }
+
+    let client = github_client_optional(&token)?;
+    let head = match fetch_remote_head_info(&client, owner, repo, branch).await {
+        Ok(h) => h,
+        Err(err) => {
+            return Ok(SyncCheckResult {
+                status: "error".into(),
+                local_sha: read_sync_state(&base_dir).map(|s| s.commit_sha),
+                remote_sha: None,
+                remote_message: None,
+                remote_author: None,
+                remote_date: None,
+                message: err,
+                total_pack_bytes: compute_local_manifest_total_size(&base_dir),
+                needed_bytes: None,
+                free_disk_bytes,
+                enough_disk_space: None,
+            });
+        }
+    };
+
+    if let Some(local_state) = read_sync_state(&base_dir) {
+        let same_target = local_state.repo_owner.eq_ignore_ascii_case(owner)
+            && local_state.repo_name.eq_ignore_ascii_case(repo)
+            && local_state.branch == branch;
+
+        if same_target && local_state.commit_sha == head.commit_sha {
+            return Ok(SyncCheckResult {
+                status: "up_to_date".into(),
+                local_sha: Some(local_state.commit_sha),
+                remote_sha: Some(head.commit_sha),
+                remote_message: Some(head.message),
+                remote_author: Some(head.author),
+                remote_date: Some(head.date),
+                message: "Сборка актуальна и синхронизирована с GitHub.".into(),
+                total_pack_bytes: compute_local_manifest_total_size(&base_dir),
+                needed_bytes: Some(0),
+                free_disk_bytes,
+                enough_disk_space: free_disk_bytes.map(|_| true),
+            });
+        }
+
+        let sizes = estimate_remote_pack_sizes(
+            &client,
+            &base_dir,
+            owner,
+            repo,
+            &head.commit_sha,
+            &head.tree_sha,
+            None,
+        )
+        .await;
+        let total_pack_bytes = sizes.map(|(t, _)| t);
+        let needed_bytes = sizes.map(|(_, n)| n);
+        let enough_disk_space = match (free_disk_bytes, needed_bytes) {
+            (Some(free), Some(need)) => Some(free >= need),
+            _ => None,
+        };
+
+        return Ok(SyncCheckResult {
+            status: "update_required".into(),
+            local_sha: Some(local_state.commit_sha),
+            remote_sha: Some(head.commit_sha),
+            remote_message: Some(head.message),
+            remote_author: Some(head.author),
+            remote_date: Some(head.date),
+            message: "На GitHub обнаружено обновление сборки! Скачайте его перед продолжением работы.".into(),
+            total_pack_bytes,
+            needed_bytes,
+            free_disk_bytes,
+            enough_disk_space,
+        });
+    }
+
+    // Если .eternum-sync.json ещё нет (например, папка перенесена или новая),
+    // проверяем, есть ли уже manifest.json в удалённом репозитории.
+    let tree_url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+        owner, repo, head.tree_sha
+    );
+    let tree_resp = client.get(&tree_url).send().await;
+    let tree_json_opt: Option<Value> = match tree_resp {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+        _ => None,
+    };
+    let remote_manifest_sha = tree_json_opt.as_ref().and_then(|tree_json| {
+        tree_json["tree"].as_array().and_then(|arr| {
+            arr.iter()
+                .find(|item| item["path"].as_str() == Some(MANIFEST_FILE))
+                .and_then(|item| item["sha"].as_str())
+                .map(|s| s.to_string())
+        })
+    });
+
+    let Some(remote_m_sha) = remote_manifest_sha else {
+        return Ok(SyncCheckResult {
+            status: "uninitialized".into(),
+            local_sha: None,
+            remote_sha: Some(head.commit_sha),
+            remote_message: Some(head.message),
+            remote_author: Some(head.author),
+            remote_date: Some(head.date),
+            message: "Репозиторий пока не содержит manifest.json — можно выполнить первую публикацию.".into(),
+            total_pack_bytes: compute_local_manifest_total_size(&base_dir),
+            needed_bytes: Some(0),
+            free_disk_bytes,
+            enough_disk_space: free_disk_bytes.map(|_| true),
+        });
+    };
+
+    let local_manifest_path = base_dir.join(MANIFEST_FILE);
+    if local_manifest_path.is_file() {
+        if let Ok(bytes) = fs::read(&local_manifest_path) {
+            if compute_git_blob_sha1(&bytes) == remote_m_sha {
+                let pack_ver = fs::read_to_string(base_dir.join(CONFIG_FILE))
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<RepoConfig>(&s).ok())
+                    .map(|c| c.pack_version)
+                    .unwrap_or_default();
+                let _ = write_sync_state(
+                    &base_dir,
+                    &SyncState {
+                        repo_owner: owner.to_string(),
+                        repo_name: repo.to_string(),
+                        branch: branch.to_string(),
+                        commit_sha: head.commit_sha.clone(),
+                        pack_version: pack_ver,
+                    },
+                );
+                return Ok(SyncCheckResult {
+                    status: "up_to_date".into(),
+                    local_sha: Some(head.commit_sha.clone()),
+                    remote_sha: Some(head.commit_sha),
+                    remote_message: Some(head.message),
+                    remote_author: Some(head.author),
+                    remote_date: Some(head.date),
+                    message: "Локальная сборка совпадает с версией на GitHub.".into(),
+                    total_pack_bytes: compute_local_manifest_total_size(&base_dir),
+                    needed_bytes: Some(0),
+                    free_disk_bytes,
+                    enough_disk_space: free_disk_bytes.map(|_| true),
+                });
+            }
+        }
+    }
+
+    let sizes = estimate_remote_pack_sizes(
+        &client,
+        &base_dir,
+        owner,
+        repo,
+        &head.commit_sha,
+        &head.tree_sha,
+        tree_json_opt.as_ref(),
+    )
+    .await;
+    let total_pack_bytes = sizes.map(|(t, _)| t);
+    let needed_bytes = sizes.map(|(_, n)| n);
+    let enough_disk_space = match (free_disk_bytes, needed_bytes) {
+        (Some(free), Some(need)) => Some(free >= need),
+        _ => None,
+    };
+
+    Ok(SyncCheckResult {
+        status: "update_required".into(),
+        local_sha: None,
+        remote_sha: Some(head.commit_sha),
+        remote_message: Some(head.message),
+        remote_author: Some(head.author),
+        remote_date: Some(head.date),
+        message: "На GitHub уже есть опубликованная сборка, но локальная папка не синхронизирована. Скачайте обновление перед продолжением.".into(),
+        total_pack_bytes,
+        needed_bytes,
+        free_disk_bytes,
+        enough_disk_space,
+    })
+}
+
+async fn download_raw_bytes(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка загрузки {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Ошибка HTTP {} при скачивании {}", resp.status(), url));
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("Ошибка чтения ответа {}: {}", url, e))
+}
+
+async fn download_raw_bytes_stream(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    url: &str,
+    file_name: &str,
+    known_size: u64,
+    total_downloaded_so_far: u64,
+    total_bytes: u64,
+    smooth_speed_bps: &mut u64,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка загрузки {}: {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Ошибка HTTP {} при скачивании {}", resp.status(), url));
+    }
+
+    let file_total = resp.content_length().unwrap_or(known_size);
+    let mut buf = Vec::with_capacity(file_total as usize);
+    let mut stream = resp.bytes_stream();
+    let mut file_downloaded: u64 = 0;
+
+    let _ = app.emit(
+        "download-stats",
+        DownloadStats {
+            file_name: Some(file_name.to_string()),
+            file_downloaded: 0,
+            file_total,
+            total_downloaded: total_downloaded_so_far,
+            total_bytes,
+            speed_bps: *smooth_speed_bps,
+        },
+    );
+
+    let mut window_start = Instant::now();
+    let mut window_bytes: u64 = 0;
+    let mut last_emit = Instant::now();
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| format!("Ошибка чтения ответа {}: {}", url, e))?;
+        let len = chunk.len() as u64;
+        buf.extend_from_slice(&chunk);
+        file_downloaded += len;
+        window_bytes += len;
+
+        if last_emit.elapsed() >= Duration::from_millis(120) {
+            let dt = window_start.elapsed().as_secs_f64().max(0.001);
+            let inst_speed = (window_bytes as f64 / dt) as u64;
+            *smooth_speed_bps = if *smooth_speed_bps == 0 {
+                inst_speed
+            } else {
+                ((*smooth_speed_bps as f64 * 0.6) + (inst_speed as f64 * 0.4)) as u64
+            };
+            let _ = app.emit(
+                "download-stats",
+                DownloadStats {
+                    file_name: Some(file_name.to_string()),
+                    file_downloaded,
+                    file_total: file_total.max(file_downloaded),
+                    total_downloaded: total_downloaded_so_far + file_downloaded,
+                    total_bytes: total_bytes.max(total_downloaded_so_far + file_downloaded),
+                    speed_bps: *smooth_speed_bps,
+                },
+            );
+            last_emit = Instant::now();
+            if window_start.elapsed() >= Duration::from_millis(500) {
+                window_bytes = 0;
+                window_start = Instant::now();
+            }
+        }
+    }
+
+    let dt = window_start.elapsed().as_secs_f64().max(0.001);
+    if window_bytes > 0 {
+        let inst_speed = (window_bytes as f64 / dt) as u64;
+        *smooth_speed_bps = if *smooth_speed_bps == 0 {
+            inst_speed
+        } else {
+            ((*smooth_speed_bps as f64 * 0.6) + (inst_speed as f64 * 0.4)) as u64
+        };
+    }
+
+    let _ = app.emit(
+        "download-stats",
+        DownloadStats {
+            file_name: Some(file_name.to_string()),
+            file_downloaded,
+            file_total: file_total.max(file_downloaded),
+            total_downloaded: total_downloaded_so_far + file_downloaded,
+            total_bytes: total_bytes.max(total_downloaded_so_far + file_downloaded),
+            speed_bps: *smooth_speed_bps,
+        },
+    );
+
+    Ok(buf)
+}
+
+fn collect_managed_local_files(base_dir: &Path) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for root_file in EXTRA_ROOT_FILES {
+        if base_dir.join(root_file).is_file() {
+            out.push((*root_file).to_string());
+        }
+    }
+    let mut dirs_to_scan: Vec<&str> = vec!["mods", "bundles"];
+    dirs_to_scan.extend_from_slice(EXTRA_DIRS);
+
+    for d in dirs_to_scan {
+        let dir_path = base_dir.join(d);
+        if !dir_path.is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_files_recursive(&dir_path, &mut files)?;
+        for f in files {
+            if let Ok(rel) = f.strip_prefix(base_dir) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn download_modpack_from_github(
+    app: AppHandle,
+    dir: String,
+    owner: String,
+    repo: String,
+    branch: String,
+    token: String,
+) -> Result<DownloadSummary, String> {
+    let base_dir = PathBuf::from(dir.trim());
+    let owner = owner.trim();
+    let repo = repo.trim();
+    let branch = branch.trim();
+    if owner.is_empty() || repo.is_empty() || branch.is_empty() {
+        return Err("Укажите владельца, репозиторий и ветку GitHub.".into());
+    }
+
+    fs::create_dir_all(&base_dir)
+        .map_err(|e| format!("Не удалось создать папку {}: {}", base_dir.display(), e))?;
+
+    let gh_client = github_client_optional(&token)?;
+    let cdn_client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "gen-progress",
+        GenProgress {
+            percent: 5,
+            status: format!("Подключение к GitHub ({}/{})...", owner, repo),
+            log: Some(format!("☁ Получение данных сборки из {}/{} ({})", owner, repo, branch)),
+        },
+    );
+
+    let head = fetch_remote_head_info(&gh_client, owner, repo, branch).await?;
+    let tree_url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+        owner, repo, head.tree_sha
+    );
+    let tree_resp = gh_client
+        .get(&tree_url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка получения дерева файлов: {}", e))?;
+    if !tree_resp.status().is_success() {
+        let status = tree_resp.status();
+        let body = tree_resp.text().await.unwrap_or_default();
+        return Err(map_github_http_error(status, &body, owner, repo));
+    }
+    let tree_json: Value = tree_resp.json().await.map_err(|e| e.to_string())?;
+
+    let mut github_tree_files: Vec<(String, String, u64)> = Vec::new(); // (rel_path, blob_sha, size)
+    if let Some(items) = tree_json["tree"].as_array() {
+        for item in items {
+            if item["type"].as_str() != Some("blob") {
+                continue;
+            }
+            let Some(path) = item["path"].as_str() else {
+                continue;
+            };
+            let Some(sha) = item["sha"].as_str() else {
+                continue;
+            };
+            let size = item["size"].as_u64().unwrap_or(0);
+            if is_managed_pack_path(path) {
+                github_tree_files.push((path.to_string(), sha.to_string(), size));
+            }
+        }
+    }
+
+    if github_tree_files.is_empty() {
+        return Err("В указанном репозитории пока нет файлов сборки.".into());
+    }
+
+    let make_commit_raw_url = |rel_path: &str| -> String {
+        let encoded: String = rel_path
+            .split('/')
+            .map(|seg| urlencoding::encode(seg).into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}",
+            owner, repo, head.commit_sha, encoded
+        )
+    };
+
+    let mut downloaded_github = 0usize;
+    let mut downloaded_modrinth = 0usize;
+    let mut skipped_cached = 0usize;
+
+    let mut expected_paths: HashSet<String> = HashSet::new();
+    let mut gh_to_download: Vec<(String, u64)> = Vec::new();
+    let mut total_pack_bytes: u64 = 0;
+
+    for (rel_path, remote_blob_sha, size) in &github_tree_files {
+        expected_paths.insert(rel_path.clone());
+        total_pack_bytes = total_pack_bytes.saturating_add(*size);
+        let local_path = base_dir.join(rel_path);
+        let is_cached = if local_path.is_file() {
+            fs::read(&local_path)
+                .map(|bytes| &compute_git_blob_sha1(&bytes) == remote_blob_sha)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if is_cached {
+            skipped_cached += 1;
+        } else {
+            gh_to_download.push((rel_path.clone(), *size));
+        }
+    }
+
+    // Если manifest.json нужно скачать, скачиваем его первым, чтобы заранее знать размер всех Modrinth-модов и проверить место на диске
+    let mut modrinth_entries: Vec<(String, String, String, u64)> = Vec::new();
+    let mut pack_version = String::new();
+    let mut manifest_val_opt: Option<Value> = None;
+    let manifest_in_gh_download = gh_to_download.iter().any(|(p, _)| p == MANIFEST_FILE);
+    if manifest_in_gh_download {
+        let m_url = make_commit_raw_url(MANIFEST_FILE);
+        let m_bytes = download_raw_bytes(&gh_client, &m_url).await?;
+        let m_path = base_dir.join(MANIFEST_FILE);
+        if let Some(parent) = m_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&m_path, &m_bytes)
+            .map_err(|e| format!("Не удалось записать {}: {}", m_path.display(), e))?;
+        downloaded_github += 1;
+        gh_to_download.retain(|(p, _)| p != MANIFEST_FILE);
+        if let Ok(raw) = String::from_utf8(m_bytes) {
+            manifest_val_opt = serde_json::from_str::<Value>(&raw).ok();
+        }
+    } else if base_dir.join(MANIFEST_FILE).is_file() {
+        if let Ok(raw) = fs::read_to_string(base_dir.join(MANIFEST_FILE)) {
+            manifest_val_opt = serde_json::from_str::<Value>(&raw).ok();
+        }
+    }
+
+    if let Some(manifest_val) = manifest_val_opt {
+        if let Some(pv) = manifest_val["packVersion"].as_str() {
+            pack_version = pv.to_string();
+        }
+        if let Some(files) = manifest_val["files"].as_array() {
+            for entry in files {
+                let Some(rel_path) = entry["path"].as_str() else {
+                    continue;
+                };
+                expected_paths.insert(rel_path.to_string());
+                if entry["source"].as_str() == Some("modrinth") {
+                    if let Some(url) = entry["url"].as_str() {
+                        let sha256 = entry["sha256"].as_str().unwrap_or("").to_string();
+                        let size = entry["size"].as_u64().unwrap_or(0);
+                        total_pack_bytes = total_pack_bytes.saturating_add(size);
+                        modrinth_entries.push((rel_path.to_string(), url.to_string(), sha256, size));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut mr_to_download: Vec<(String, String, String, u64)> = Vec::new();
+    for (rel_path, url, expected_sha256, size) in modrinth_entries {
+        let local_path = base_dir.join(&rel_path);
+        let is_cached = if local_path.is_file() && !expected_sha256.is_empty() {
+            compute_hashes(&local_path)
+                .map(|(sha256, _, _)| sha256.eq_ignore_ascii_case(&expected_sha256))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if is_cached {
+            skipped_cached += 1;
+        } else {
+            mr_to_download.push((rel_path, url, expected_sha256, size));
+        }
+    }
+
+    let gh_download_bytes: u64 = gh_to_download.iter().map(|(_, s)| *s).sum();
+    let mr_download_bytes: u64 = mr_to_download.iter().map(|(_, _, _, s)| *s).sum();
+    let total_download_bytes = gh_download_bytes.saturating_add(mr_download_bytes);
+
+    if let Some(free_bytes) = get_available_disk_space(&base_dir) {
+        if free_bytes < total_download_bytes {
+            return Err(format!(
+                "Недостаточно свободного места на диске! Нужно: {}, доступно: {}.",
+                format_bytes_ru(total_download_bytes),
+                format_bytes_ru(free_bytes)
+            ));
+        }
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: 8,
+                status: format!(
+                    "Подготовка загрузки ({} из {})...",
+                    format_bytes_ru(total_download_bytes),
+                    format_bytes_ru(total_pack_bytes)
+                ),
+                log: Some(format!(
+                    "💾 Вес сборки: {}, нужно скачать: {}, свободно на диске: {}",
+                    format_bytes_ru(total_pack_bytes),
+                    format_bytes_ru(total_download_bytes),
+                    format_bytes_ru(free_bytes)
+                )),
+            },
+        );
+    }
+
+    let mut total_downloaded_bytes: u64 = 0;
+    let mut smooth_speed_bps: u64 = 0;
+
+    // 1. Скачиваем файлы из GitHub-дерева
+    let total_gh = gh_to_download.len();
+    for (idx, (rel_path, known_size)) in gh_to_download.iter().enumerate() {
+        let local_path = base_dir.join(rel_path);
+        let pct = if total_download_bytes > 0 {
+            10 + (((total_downloaded_bytes as f64 / total_download_bytes as f64) * 80.0) as u32)
+        } else {
+            10 + ((idx as f32 / total_gh.max(1) as f32) * 35.0) as u32
+        };
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: pct.min(92),
+                status: format!("Скачивание из GitHub ({}/{}): {}", idx + 1, total_gh, rel_path),
+                log: Some(format!("⬇ GitHub: {} ({})", rel_path, format_bytes_ru(*known_size))),
+            },
+        );
+
+        let url = make_commit_raw_url(rel_path);
+        let bytes = download_raw_bytes_stream(
+            &app,
+            &gh_client,
+            &url,
+            rel_path,
+            *known_size,
+            total_downloaded_bytes,
+            total_download_bytes,
+            &mut smooth_speed_bps,
+        )
+        .await?;
+        total_downloaded_bytes = total_downloaded_bytes.saturating_add(bytes.len() as u64);
+
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&local_path, &bytes)
+            .map_err(|e| format!("Не удалось записать {}: {}", local_path.display(), e))?;
+        downloaded_github += 1;
+    }
+
+    if pack_version.is_empty() {
+        pack_version = fs::read_to_string(base_dir.join(CONFIG_FILE))
+            .ok()
+            .and_then(|s| serde_json::from_str::<RepoConfig>(&s).ok())
+            .map(|c| c.pack_version)
+            .unwrap_or_default();
+    }
+
+    // 2. Докачиваем моды с Modrinth CDN
+    let total_mr = mr_to_download.len();
+    for (idx, (rel_path, url, expected_sha256, known_size)) in mr_to_download.iter().enumerate() {
+        let local_path = base_dir.join(rel_path);
+        let pct = if total_download_bytes > 0 {
+            10 + (((total_downloaded_bytes as f64 / total_download_bytes as f64) * 80.0) as u32)
+        } else {
+            45 + ((idx as f32 / total_mr.max(1) as f32) * 45.0) as u32
+        };
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: pct.min(92),
+                status: format!("Скачивание с Modrinth ({}/{}): {}", idx + 1, total_mr, rel_path),
+                log: Some(format!("⬇ Modrinth: {} ({})", rel_path, format_bytes_ru(*known_size))),
+            },
+        );
+
+        let bytes = download_raw_bytes_stream(
+            &app,
+            &cdn_client,
+            url,
+            rel_path,
+            *known_size,
+            total_downloaded_bytes,
+            total_download_bytes,
+            &mut smooth_speed_bps,
+        )
+        .await?;
+        total_downloaded_bytes = total_downloaded_bytes.saturating_add(bytes.len() as u64);
+
+        if !expected_sha256.is_empty() {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let actual = hex::encode(hasher.finalize());
+            if !actual.eq_ignore_ascii_case(expected_sha256) {
+                return Err(format!(
+                    "Несовпадение SHA-256 для {}: ожидался {}, получен {}",
+                    rel_path, expected_sha256, actual
+                ));
+            }
+        }
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&local_path, &bytes)
+            .map_err(|e| format!("Не удалось записать {}: {}", local_path.display(), e))?;
+        downloaded_modrinth += 1;
+    }
+
+    // 3. Удаляем локальные устаревшие файлы сборки, которых больше нет в удалённой версии
+    let mut removed_stale = 0usize;
+    for local_rel in collect_managed_local_files(&base_dir)? {
+        if !expected_paths.contains(&local_rel) {
+            let full = base_dir.join(&local_rel);
+            if full.is_file() && fs::remove_file(&full).is_ok() {
+                removed_stale += 1;
+            }
+        }
+    }
+
+    write_sync_state(
+        &base_dir,
+        &SyncState {
+            repo_owner: owner.to_string(),
+            repo_name: repo.to_string(),
+            branch: branch.to_string(),
+            commit_sha: head.commit_sha.clone(),
+            pack_version: pack_version.clone(),
+        },
+    )?;
+
+    let _ = app.emit(
+        "gen-progress",
+        GenProgress {
+            percent: 100,
+            status: "Сборка успешно синхронизирована с GitHub!".into(),
+            log: Some(format!(
+                "✅ Готово! Коммит {}: скачано с GitHub {}, с Modrinth {}, из кэша {}, удалено устаревших {}",
+                &head.commit_sha[..7.min(head.commit_sha.len())],
+                downloaded_github,
+                downloaded_modrinth,
+                skipped_cached,
+                removed_stale
+            )),
+        },
+    );
+
+    Ok(DownloadSummary {
+        dir: base_dir.to_string_lossy().to_string(),
+        commit_sha: head.commit_sha,
+        pack_version,
+        downloaded_github,
+        downloaded_modrinth,
+        skipped_cached,
+        removed_stale,
+    })
+}
+
 fn github_client(token: &str) -> Result<reqwest::Client, String> {
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
     let mut headers = HeaderMap::new();
@@ -1159,6 +2352,20 @@ async fn publish_to_github(
         .ok_or_else(|| "Не удалось получить SHA последнего коммита ветки.".to_string())?
         .to_string();
 
+    if let Some(local_sync) = read_sync_state(&base_dir) {
+        if local_sync.repo_owner.eq_ignore_ascii_case(owner)
+            && local_sync.repo_name.eq_ignore_ascii_case(repo)
+            && local_sync.branch == branch
+            && local_sync.commit_sha != head_sha
+        {
+            return Err(format!(
+                "На GitHub есть более новый коммит ({}), чем локально ({}). Сначала скачайте обновление!",
+                &head_sha[..7.min(head_sha.len())],
+                &local_sync.commit_sha[..7.min(local_sync.commit_sha.len())]
+            ));
+        }
+    }
+
     // 2. Дерево последнего коммита
     let commit_url = format!(
         "https://api.github.com/repos/{}/{}/git/commits/{}",
@@ -1298,6 +2505,16 @@ async fn publish_to_github(
 
     let repo_url = format!("https://github.com/{}/{}", owner, repo);
     if uploaded_count == 0 && removed_count == 0 {
+        let _ = write_sync_state(
+            &base_dir,
+            &SyncState {
+                repo_owner: owner.to_string(),
+                repo_name: repo.to_string(),
+                branch: branch.to_string(),
+                commit_sha: head_sha.clone(),
+                pack_version: config.pack_version.clone(),
+            },
+        );
         let _ = app.emit(
             "gen-progress",
             GenProgress {
@@ -1399,6 +2616,17 @@ async fn publish_to_github(
         return Err(map_github_http_error(status, &body, owner, repo));
     }
 
+    let _ = write_sync_state(
+        &base_dir,
+        &SyncState {
+            repo_owner: owner.to_string(),
+            repo_name: repo.to_string(),
+            branch: branch.to_string(),
+            commit_sha: new_commit_sha.clone(),
+            pack_version: config.pack_version.clone(),
+        },
+    );
+
     let _ = app.emit(
         "gen-progress",
         GenProgress {
@@ -1425,6 +2653,11 @@ async fn publish_to_github(
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             detect_initial_dir,
@@ -1436,8 +2669,10 @@ fn main() {
             load_github_token,
             save_github_token,
             check_github_access,
+            check_remote_sync,
+            download_modpack_from_github,
             publish_to_github
         ])
         .run(tauri::generate_context!())
-        .expect("Ошибка запуска Eternum Manifest Generator");
+        .expect("Ошибка запуска Eternum Modpack Manager");
 }

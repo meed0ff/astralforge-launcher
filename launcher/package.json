@@ -1,7 +1,7 @@
 {
-  "name": "astralforge-launcher",
+  "name": "eternum-launcher",
   "version": "1.0.0",
-  "description": "AstralForge Minecraft Launcher for 1.21.1 NeoForge",
+  "description": "Eternum Minecraft Launcher for 1.21.1 NeoForge",
   "private": true,
   "scripts": {
     "dev": "tauri dev",

@@ -1,8 +1,8 @@
 [package]
-name = "astralforge-launcher"
+name = "eternum-launcher"
 version = "1.0.0"
-description = "AstralForge Minecraft Launcher"
-authors = ["AstralForge Team"]
+description = "Eternum Minecraft Launcher"
+authors = ["Eternum Team"]
 edition = "2021"
 
 [build-dependencies]
@@ -24,3 +24,6 @@ urlencoding = "2.1"
 dirs = "5.0"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
