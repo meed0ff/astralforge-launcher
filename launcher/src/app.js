@@ -1,14 +1,18 @@
-// AstralForge Launcher Frontend Logic
+// Eternum Launcher Frontend Logic
 const hasTauri = typeof window.__TAURI__ !== "undefined";
+
+// Временный тестовый сервер (оставьте пустым, чтобы брать IP из manifest.json)
+const TEMP_TEST_SERVER = "d5.aurorix.net:19804";
 
 // State
 let currentTab = "elyby"; // "elyby" | "offline"
 let elybyAccount = null;
+let gameState = "idle"; // "idle" | "launching" | "running" | "stopping"
 let serverData = {
-  ip: "eternum.aurorix.pro",
-  port: 25565,
-  fallbackIp: "d22.aurorix.net",
-  fallbackPort: 25584
+  ip: "d5.aurorix.net",
+  port: 19804,
+  fallbackIp: "d5.aurorix.net",
+  fallbackPort: 19804
 };
 
 // DOM Elements
@@ -25,10 +29,15 @@ const elybyUsernameEl = document.getElementById("elyby-username");
 const elybyAvatarEl = document.getElementById("elyby-avatar");
 const offlineNickInput = document.getElementById("offline-nick");
 
-const ramSlider = document.getElementById("ram-slider");
-const ramDisplay = document.getElementById("ram-display");
+const ramInput = document.getElementById("ram-input");
+const ramDecBtn = document.getElementById("ram-dec");
+const ramIncBtn = document.getElementById("ram-inc");
+const ramPresetBtns = Array.from(document.querySelectorAll(".ram-preset-btn"));
+let currentRamGb = 6;
 
 const btnPlay = document.getElementById("btn-play");
+const playIconEl = document.getElementById("play-icon");
+const playTextEl = document.getElementById("play-text");
 const progressContainer = document.getElementById("progress-container");
 const progressFill = document.getElementById("progress-fill");
 const progressStatus = document.getElementById("progress-status");
@@ -49,6 +58,8 @@ const btnOpenGameFolder = document.getElementById("btn-open-game-folder");
 
 const serverIpBtn = document.getElementById("server-ip-btn");
 const serverIpText = document.getElementById("server-ip-text");
+const serverTitleEl = document.getElementById("server-title");
+const versionBadgeEl = document.getElementById("version-badge");
 const serverMeta = document.getElementById("server-meta");
 const toastContainer = document.getElementById("toast-container");
 
@@ -92,11 +103,36 @@ tabOffline.addEventListener("click", () => {
   localStorage.setItem("astral_tab", "offline");
 });
 
-// RAM Slider
-ramSlider.addEventListener("input", (e) => {
-  ramDisplay.textContent = `${e.target.value} GB`;
-  localStorage.setItem("astral_ram", e.target.value);
-});
+// RAM Selection (presets + stepper + manual input)
+function setRamGb(value, persist = true) {
+  const parsed = parseInt(value, 10);
+  const clamped = Number.isNaN(parsed) ? 6 : Math.min(32, Math.max(2, parsed));
+  currentRamGb = clamped;
+  if (ramInput) ramInput.value = String(clamped);
+  if (ramDecBtn) ramDecBtn.disabled = clamped <= 2;
+  if (ramIncBtn) ramIncBtn.disabled = clamped >= 32;
+  for (const btn of ramPresetBtns) {
+    const presetVal = parseInt(btn.dataset.ram, 10);
+    btn.classList.toggle("active", presetVal === clamped);
+  }
+  if (persist) {
+    localStorage.setItem("astral_ram", String(clamped));
+  }
+}
+
+if (ramDecBtn) {
+  ramDecBtn.addEventListener("click", () => setRamGb(currentRamGb - 1));
+}
+if (ramIncBtn) {
+  ramIncBtn.addEventListener("click", () => setRamGb(currentRamGb + 1));
+}
+if (ramInput) {
+  ramInput.addEventListener("change", () => setRamGb(ramInput.value));
+  ramInput.addEventListener("blur", () => setRamGb(ramInput.value));
+}
+for (const btn of ramPresetBtns) {
+  btn.addEventListener("click", () => setRamGb(btn.dataset.ram));
+}
 
 // Ely.by Login / Logout
 btnElybyLogin.addEventListener("click", async () => {
@@ -207,11 +243,13 @@ btnSettings.addEventListener("click", () => settingsModal.classList.remove("hidd
 btnModalClose.addEventListener("click", () => settingsModal.classList.add("hidden"));
 
 btnSaveSettings.addEventListener("click", () => {
+  setRamGb(ramInput ? ramInput.value : currentRamGb);
   localStorage.setItem("astral_manifest_url", settingManifestUrl.value);
   localStorage.setItem("astral_java_path", settingJavaPath.value);
   settingsModal.classList.add("hidden");
   addLog("Настройки сохранены.");
   showToast("Настройки сохранены", "success");
+  refreshManifestMetadata();
 });
 
 btnOpenGameFolder.addEventListener("click", () => {
@@ -232,8 +270,55 @@ function setProgress(percent, status) {
   progressStatus.textContent = status;
 }
 
-// Play Button
+function setPlayButtonMode(mode) {
+  gameState = mode;
+  if (mode === "running") {
+    btnPlay.disabled = false;
+    btnPlay.classList.add("btn-stop");
+    if (playIconEl) playIconEl.textContent = "■";
+    if (playTextEl) playTextEl.textContent = "ОСТАНОВИТЬ";
+  } else if (mode === "stopping") {
+    btnPlay.disabled = true;
+    btnPlay.classList.add("btn-stop");
+    if (playIconEl) playIconEl.textContent = "■";
+    if (playTextEl) playTextEl.textContent = "ОСТАНОВКА...";
+  } else if (mode === "launching") {
+    btnPlay.disabled = true;
+    btnPlay.classList.remove("btn-stop");
+    if (playIconEl) playIconEl.textContent = "⏳";
+    if (playTextEl) playTextEl.textContent = "ЗАПУСК...";
+  } else {
+    btnPlay.disabled = false;
+    btnPlay.classList.remove("btn-stop");
+    if (playIconEl) playIconEl.textContent = "▶";
+    if (playTextEl) playTextEl.textContent = "ИГРАТЬ";
+  }
+}
+
+// Play / Stop Button
 btnPlay.addEventListener("click", async () => {
+  if (gameState === "running") {
+    setPlayButtonMode("stopping");
+    addLog("Остановка процесса Minecraft...", "info");
+    if (hasTauri) {
+      try {
+        await window.__TAURI__.core.invoke("stop_game");
+      } catch (err) {
+        addLog(`Не удалось остановить игру: ${err}`, "error");
+        showToast(`Не удалось остановить игру: ${err}`, "error");
+        setPlayButtonMode("idle");
+      }
+    } else {
+      setTimeout(() => {
+        setPlayButtonMode("idle");
+        addLog("Процесс игры остановлен пользователем.");
+      }, 400);
+    }
+    return;
+  }
+
+  if (gameState !== "idle") return;
+
   let nickname = "";
   let authType = currentTab;
   let accessToken = "0";
@@ -245,7 +330,7 @@ btnPlay.addEventListener("click", async () => {
       return;
     }
     nickname = elybyAccount.username;
-    accessToken = elybyAccount.accessToken;
+    accessToken = elybyAccount.accessToken || elybyAccount.access_token || "0";
     uuid = elybyAccount.uuid;
   } else {
     nickname = offlineNickInput.value.trim();
@@ -257,7 +342,7 @@ btnPlay.addEventListener("click", async () => {
     localStorage.setItem("astral_nick", nickname);
   }
 
-  btnPlay.disabled = true;
+  setPlayButtonMode("launching");
   addLog(`Подготовка к запуску для ${nickname} (${authType})...`);
   setProgress(5, "Чтение манифеста сборки...");
 
@@ -266,7 +351,7 @@ btnPlay.addEventListener("click", async () => {
     authType,
     uuid,
     accessToken,
-    ramGb: parseInt(ramSlider.value),
+    ramGb: currentRamGb,
     javaPath: settingJavaPath.value.trim() || "java",
     manifestUrl: settingManifestUrl.value.trim()
   };
@@ -274,14 +359,16 @@ btnPlay.addEventListener("click", async () => {
   if (hasTauri) {
     try {
       await window.__TAURI__.core.invoke("start_sync_and_launch", { request: launchRequest });
-      btnPlay.disabled = false;
+      if (gameState === "launching") {
+        setPlayButtonMode("running");
+      }
       setTimeout(() => {
         progressContainer.style.display = "none";
       }, 2000);
     } catch (err) {
       addLog(`Ошибка запуска: ${err}`, "error");
       showToast(`Ошибка запуска: ${err}`, "error");
-      btnPlay.disabled = false;
+      setPlayButtonMode("idle");
       progressContainer.style.display = "none";
     }
   } else {
@@ -295,8 +382,8 @@ function simulateLaunch() {
     { p: 15, s: "Сверка манифеста с GitHub..." },
     { p: 35, s: "Проверка модов с Modrinth CDN..." },
     { p: 65, s: "Сверка конфигурационных файлов..." },
-    { p: 85, s: "Проверка библиотек NeoForge 21.1.267..." },
-    { p: 100, s: "Запуск Minecraft 1.21.1!" }
+    { p: 85, s: "Проверка библиотек Fabric..." },
+    { p: 100, s: "Запуск Minecraft!" }
   ];
   let idx = 0;
   const interval = setInterval(() => {
@@ -307,12 +394,63 @@ function simulateLaunch() {
     } else {
       clearInterval(interval);
       setTimeout(() => {
-        btnPlay.disabled = false;
+        setPlayButtonMode("running");
         progressContainer.style.display = "none";
         addLog("Игра успешно запущена!", "success");
       }, 1000);
     }
   }, 800);
+}
+
+function parseServerAddr(addr) {
+  const parts = addr.split(":");
+  return {
+    ip: parts[0] || serverData.ip,
+    port: parts[1] ? parseInt(parts[1], 10) || 25565 : 25565
+  };
+}
+
+function pingCurrentServer() {
+  if (!hasTauri || !window.__TAURI__.core) return;
+  window.__TAURI__.core.invoke("check_server_status", { ip: serverData.ip, port: serverData.port })
+    .catch(() => window.__TAURI__.core.invoke("check_server_status", { ip: serverData.fallbackIp, port: serverData.fallbackPort }))
+    .then((status) => {
+      serverMeta.textContent = `🟢 Онлайн: ${status.online_players}/${status.max_players} | Пинг: ${status.ping_ms} ms`;
+    })
+    .catch(() => {
+      serverMeta.textContent = `🟡 Сервер запускается или спит`;
+    });
+}
+
+function refreshManifestMetadata() {
+  if (!hasTauri || !window.__TAURI__.core) return;
+  const manifestUrl = settingManifestUrl.value.trim();
+  if (!manifestUrl) return;
+  window.__TAURI__.core.invoke("fetch_manifest_info", { manifestUrl })
+    .then((info) => {
+      const loaderLabel = info.loader_type.charAt(0).toUpperCase() + info.loader_type.slice(1);
+      if (versionBadgeEl) {
+        versionBadgeEl.textContent = info.pack_version
+          ? `${info.minecraft_version} ${loaderLabel} · ${info.pack_version}`
+          : `${info.minecraft_version} ${loaderLabel}`;
+      }
+      if (serverTitleEl && info.server_name) {
+        serverTitleEl.textContent = info.server_name;
+      }
+      const effectiveServerIp = TEMP_TEST_SERVER || info.server_ip;
+      if (effectiveServerIp) {
+        if (serverIpText) serverIpText.textContent = effectiveServerIp;
+        const parsed = parseServerAddr(effectiveServerIp);
+        serverData.ip = parsed.ip;
+        serverData.port = parsed.port;
+        serverData.fallbackIp = parsed.ip;
+        serverData.fallbackPort = parsed.port;
+        pingCurrentServer();
+      }
+    })
+    .catch((err) => {
+      addLog(`Не удалось получить метаданные манифеста: ${err}`, "info");
+    });
 }
 
 // Initial Load
@@ -322,10 +460,7 @@ function initLauncher() {
   // Restore RAM
   try {
     const savedRam = localStorage.getItem("astral_ram");
-    if (savedRam) {
-      ramSlider.value = savedRam;
-      ramDisplay.textContent = `${savedRam} GB`;
-    }
+    setRamGb(savedRam || 6, false);
 
     // Restore Offline Nick
     const savedNick = localStorage.getItem("astral_nick");
@@ -351,7 +486,9 @@ function initLauncher() {
 
     // Restore Settings
     const savedManifestUrl = localStorage.getItem("astral_manifest_url");
-    if (savedManifestUrl) settingManifestUrl.value = savedManifestUrl;
+    if (savedManifestUrl && !savedManifestUrl.includes("YourGithubUsername")) {
+      settingManifestUrl.value = savedManifestUrl;
+    }
 
     const savedJavaPath = localStorage.getItem("astral_java_path");
     if (savedJavaPath) settingJavaPath.value = savedJavaPath;
@@ -373,15 +510,18 @@ function initLauncher() {
       addLog(event.payload, "info");
     });
 
+    window.__TAURI__.event.listen("game-started", () => {
+      setPlayButtonMode("running");
+    });
+
+    window.__TAURI__.event.listen("game-stopped", () => {
+      setPlayButtonMode("idle");
+      progressContainer.style.display = "none";
+    });
+
     // Check Server Status via Tauri (with fallback to direct node IP:port)
-    window.__TAURI__.core.invoke("check_server_status", { ip: serverData.ip, port: serverData.port })
-      .catch(() => window.__TAURI__.core.invoke("check_server_status", { ip: serverData.fallbackIp, port: serverData.fallbackPort }))
-      .then((status) => {
-        serverMeta.textContent = `🟢 Онлайн: ${status.online_players}/${status.max_players} | Пинг: ${status.ping_ms} ms`;
-      })
-      .catch(() => {
-        serverMeta.textContent = `🟡 Сервер запускается или спит`;
-      });
+    pingCurrentServer();
+    refreshManifestMetadata();
   } else {
     serverMeta.textContent = `🟢 Онлайн: 12/50 | Пинг: 24 ms`;
   }

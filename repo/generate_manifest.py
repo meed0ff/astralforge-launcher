@@ -16,27 +16,48 @@ import sys
 import json
 import hashlib
 import urllib.request
+import urllib.parse
 import urllib.error
 from pathlib import Path
 
 CONFIG_FILE = "repo_config.json"
 MODRINTH_API = "https://api.modrinth.com/v2/version_files"
-USER_AGENT = "AstralForge-ManifestGen/1.0"
+USER_AGENT = "Eternum-ManifestGen/1.0"
+
+EXTRA_DIRS = [
+    "config",
+    "defaultconfigs",
+    "resourcepacks",
+    "shaderpacks",
+    "kubejs",
+    "datapacks",
+]
+EXTRA_ROOT_FILES = ["options.txt", "servers.dat"]
+
+
+def make_github_raw_url(config, rel_path):
+    encoded = urllib.parse.quote(rel_path, safe="/")
+    return (
+        f"https://raw.githubusercontent.com/{config['repo_owner']}/"
+        f"{config['repo_name']}/{config['branch']}/{encoded}"
+    )
 
 
 def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    config_path = Path(__file__).resolve().parent / CONFIG_FILE
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {
-        "repo_owner": "YourGithubUsername",
-        "repo_name": "astralforge-repo",
+        "repo_owner": "meed0ff",
+        "repo_name": "eternum-modpack",
         "branch": "main",
-        "minecraft_version": "1.21.1",
-        "loader_type": "neoforge",
-        "loader_version": "21.1.267",
-        "server_name": "AstralForge",
-        "server_ip": "play.astralforge.net:25565"
+        "pack_version": "1.0 - test",
+        "minecraft_version": "26.3",
+        "loader_type": "fabric",
+        "loader_version": "0.20.1",
+        "server_name": "Eternum",
+        "server_ip": "eternum.aurorix.pro"
     }
 
 
@@ -144,7 +165,7 @@ def main():
                 continue
 
         # Если мода нет на Modrinth
-        raw_url = f"https://raw.githubusercontent.com/{config['repo_owner']}/{config['repo_name']}/{config['branch']}/mods/{filename}"
+        raw_url = make_github_raw_url(config, item["path"])
         files_list.append({
             "path": item["path"],
             "source": "github",
@@ -155,32 +176,88 @@ def main():
         github_count += 1
         print(f"  • [GitHub Raw]   {filename}")
 
-    # 3. Сканирование папки config/
-    print("\n[3/3] Сканирование папки config/...")
-    cfg_count = 0
-    for root, _, files in os.walk(config_dir):
-        for file in files:
-            file_path = Path(root) / file
-            rel_path = file_path.relative_to(base_dir).as_posix()
+    # 3. Сканирование дополнительных папок (config, resourcepacks, shaderpacks, kubejs и т.д.)
+    print("\n[3/4] Сканирование конфигураций, ресурспаков, шейдеров, kubejs...")
+    extra_count = 0
+    for folder_name in EXTRA_DIRS:
+        folder_dir = base_dir / folder_name
+        folder_dir.mkdir(exist_ok=True)
+        for root, _, files in os.walk(folder_dir):
+            for file in sorted(files):
+                if file == ".gitkeep":
+                    continue
+                file_path = Path(root) / file
+                rel_path = file_path.relative_to(base_dir).as_posix()
+                sha256, _, size = compute_hashes(file_path)
+                files_list.append({
+                    "path": rel_path,
+                    "source": "github",
+                    "url": make_github_raw_url(config, rel_path),
+                    "sha256": sha256,
+                    "size": size
+                })
+                extra_count += 1
+
+    for root_file in EXTRA_ROOT_FILES:
+        file_path = base_dir / root_file
+        if file_path.is_file():
             sha256, _, size = compute_hashes(file_path)
-            raw_url = f"https://raw.githubusercontent.com/{config['repo_owner']}/{config['repo_name']}/{config['branch']}/{rel_path}"
             files_list.append({
-                "path": rel_path,
+                "path": root_file,
                 "source": "github",
-                "url": raw_url,
+                "url": make_github_raw_url(config, root_file),
                 "sha256": sha256,
                 "size": size
             })
-            cfg_count += 1
+            extra_count += 1
 
-    print(f"  Добавлено файлов конфигурации: {cfg_count}")
+    print(f"  Добавлено доп. файлов: {extra_count}")
 
-    # 4. Формирование manifest.json
+    # 4. Сканирование zip-бандлов для клиентской распаковки (bundles/*.zip)
+    print("\n[4/4] Сканирование zip-бандлов (bundles/)...")
+    bundles_dir = base_dir / "bundles"
+    bundles_dir.mkdir(exist_ok=True)
+    extract_map = config.get("bundles_extract_map", {})
+    bundle_count = 0
+    for bundle_path in sorted(bundles_dir.glob("*.zip")):
+        if not bundle_path.is_file():
+            continue
+        rel_path = bundle_path.relative_to(base_dir).as_posix()
+        sha256, _, size = compute_hashes(bundle_path)
+        extract_to = extract_map.get(
+            bundle_path.name,
+            "" if bundle_path.stem == "root" else bundle_path.stem,
+        )
+        files_list.append({
+            "path": rel_path,
+            "source": "github",
+            "url": make_github_raw_url(config, rel_path),
+            "sha256": sha256,
+            "size": size,
+            "extractTo": extract_to,
+        })
+        bundle_count += 1
+        print(f"  📦 [Bundle -> /{extract_to}] {bundle_path.name}")
+
+    # 5. Формирование manifest.json
+    loader_type = config["loader_type"].lower()
+    if loader_type == "fabric":
+        installer_url = (
+            f"https://meta.fabricmc.net/v2/versions/loader/"
+            f"{config['minecraft_version']}/{config['loader_version']}/profile/json"
+        )
+    else:
+        installer_url = (
+            f"https://maven.neoforged.net/releases/net/neoforged/neoforge/"
+            f"{config['loader_version']}/neoforge-{config['loader_version']}-installer.jar"
+        )
+
     manifest = {
         "schemaVersion": 1,
+        "packVersion": config.get("pack_version", "1.0"),
         "server": {
-            "name": config.get("server_name", "AstralForge"),
-            "ip": config.get("server_ip", "play.astralforge.net:25565")
+            "name": config.get("server_name", "Eternum"),
+            "ip": config.get("server_ip", "eternum.aurorix.pro")
         },
         "minecraft": {
             "version": config["minecraft_version"]
@@ -188,7 +265,7 @@ def main():
         "loader": {
             "type": config["loader_type"],
             "version": config["loader_version"],
-            "installer_url": f"https://maven.neoforged.net/releases/net/neoforged/neoforge/{config['loader_version']}/neoforge-{config['loader_version']}-installer.jar"
+            "installer_url": installer_url
         },
         "elyby": {
             "clientId": "astralforge1"
@@ -204,8 +281,9 @@ def main():
     print(f"🎉 Готово! manifest.json успешно сгенерирован:")
     print(f"   - Модов с Modrinth CDN: {modrinth_count}")
     print(f"   - Модов с GitHub:        {github_count}")
-    print(f"   - Конфигов с GitHub:     {cfg_count}")
-    print(f"   - Всего файлов:          {len(files_list)}")
+    print(f"   - Доп. файлов (конфиги/ресурспаки/шейдеры): {extra_count}")
+    print(f"   - ZIP-бандлов:           {bundle_count}")
+    print(f"   - Всего записей:         {len(files_list)}")
     print(f"Сохранено в: {manifest_path}")
     print("=" * 60)
 

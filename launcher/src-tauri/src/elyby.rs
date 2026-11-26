@@ -14,6 +14,7 @@ pub const CALLBACK_IPC_ADDR: &str = "127.0.0.1:45679";
 pub struct ElybyUser {
     pub username: String,
     pub uuid: String,
+    #[serde(rename = "accessToken", alias = "access_token")]
     pub access_token: String,
 }
 
@@ -34,33 +35,85 @@ struct UserInfoResponse {
 }
 
 /// Регистрирует обработчик astralforge:// в системе на Linux (~/.local/share/applications)
+#[cfg(target_os = "linux")]
 pub fn register_uri_scheme_linux() {
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(exe_path) = std::env::current_exe() else {
-            return;
-        };
-        let Some(data_dir) = dirs::data_local_dir() else {
-            return;
-        };
-        let apps_dir = data_dir.join("applications");
-        if std::fs::create_dir_all(&apps_dir).is_err() {
-            return;
-        }
-        let desktop_path = apps_dir.join("astralforge-launcher.desktop");
-        let desktop_content = format!(
-            "[Desktop Entry]\nName=AstralForge Launcher\nExec={} %u\nType=Application\nTerminal=false\nNoDisplay=true\nMimeType=x-scheme-handler/astralforge;\n",
-            exe_path.to_string_lossy()
-        );
-        if std::fs::write(&desktop_path, desktop_content).is_ok() {
-            let _ = std::process::Command::new("xdg-mime")
-                .args(["default", "astralforge-launcher.desktop", "x-scheme-handler/astralforge"])
-                .output();
-            let _ = std::process::Command::new("update-desktop-database")
-                .arg(&apps_dir)
-                .output();
-        }
+    let Ok(exe_path) = std::env::current_exe() else {
+        return;
+    };
+    let Some(data_dir) = dirs::data_local_dir() else {
+        return;
+    };
+    let apps_dir = data_dir.join("applications");
+    if std::fs::create_dir_all(&apps_dir).is_err() {
+        return;
     }
+    let desktop_path = apps_dir.join("astralforge-launcher.desktop");
+    let desktop_content = format!(
+        "[Desktop Entry]\nName=AstralForge Launcher\nExec={} %u\nType=Application\nTerminal=false\nNoDisplay=true\nMimeType=x-scheme-handler/astralforge;\n",
+        exe_path.to_string_lossy()
+    );
+    if std::fs::write(&desktop_path, desktop_content).is_ok() {
+        let _ = std::process::Command::new("xdg-mime")
+            .args(["default", "astralforge-launcher.desktop", "x-scheme-handler/astralforge"])
+            .output();
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(&apps_dir)
+            .output();
+    }
+}
+
+/// Регистрирует обработчик astralforge:// в реестре Windows (HKCU\Software\Classes\astralforge)
+#[cfg(target_os = "windows")]
+pub fn register_uri_scheme_windows() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let Ok(exe_path) = std::env::current_exe() else {
+        return;
+    };
+    let command_value = format!("\"{}\" \"%1\"", exe_path.to_string_lossy());
+
+    let entries: &[&[&str]] = &[
+        &[
+            "add",
+            r"HKCU\Software\Classes\astralforge",
+            "/ve",
+            "/d",
+            "URL:AstralForge Protocol",
+            "/f",
+        ],
+        &[
+            "add",
+            r"HKCU\Software\Classes\astralforge",
+            "/v",
+            "URL Protocol",
+            "/d",
+            "",
+            "/f",
+        ],
+        &[
+            "add",
+            r"HKCU\Software\Classes\astralforge\shell\open\command",
+            "/ve",
+            "/d",
+            &command_value,
+            "/f",
+        ],
+    ];
+
+    for args in entries {
+        let mut cmd = std::process::Command::new("reg");
+        cmd.args(*args).creation_flags(CREATE_NO_WINDOW);
+        let _ = cmd.output();
+    }
+}
+
+/// Кроссплатформенная регистрация URI-схемы astralforge:// в текущей ОС
+pub fn register_uri_scheme() {
+    #[cfg(target_os = "linux")]
+    register_uri_scheme_linux();
+    #[cfg(target_os = "windows")]
+    register_uri_scheme_windows();
 }
 
 /// Если бинарник запущен с аргументом astralforge://..., пересылает его в основной процесс и возвращает true
@@ -77,7 +130,7 @@ pub fn try_forward_deep_link() -> bool {
 
 /// Открывает браузер для авторизации через Ely.by OAuth2 и ждет callback astralforge://callback
 pub async fn login_via_elyby() -> Result<ElybyUser, String> {
-    register_uri_scheme_linux();
+    register_uri_scheme();
 
     let listener = TcpListener::bind(CALLBACK_IPC_ADDR)
         .await

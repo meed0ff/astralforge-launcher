@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AstralForge Launcher</title>
+  <title>Eternum Launcher</title>
   <link rel="stylesheet" href="style.css">
   <script>
     window.addEventListener("error", function (e) {
@@ -18,9 +18,9 @@
   <!-- Custom Window Header -->
   <header class="app-header">
     <div class="logo-area">
-      <div class="forge-gem"></div>
-      <span class="logo-title">ASTRAL<span class="accent">FORGE</span></span>
-      <span class="version-badge">1.21.1 NeoForge</span>
+      <img src="logo.webp" alt="Eternum" class="header-logo" />
+      <span class="logo-title">ETER<span class="accent">NUM</span></span>
+      <span class="version-badge" id="version-badge">26.3 Fabric</span>
     </div>
     <div class="window-controls">
       <button id="btn-settings" class="ctrl-btn" title="Настройки">⚙</button>
@@ -32,14 +32,17 @@
     <!-- Server Status Banner -->
     <section class="server-card">
       <div class="server-info">
-        <div class="server-status-dot" id="server-dot"></div>
+        <img src="logo.webp" alt="Eternum" class="server-logo" />
         <div>
-          <div class="server-name" id="server-title">AstralForge Official</div>
+          <div class="server-title-row">
+            <div class="server-status-dot" id="server-dot"></div>
+            <div class="server-name" id="server-title">Eternum</div>
+          </div>
           <div class="server-meta" id="server-meta">Проверка онлайна...</div>
         </div>
       </div>
       <div class="server-ip-box" id="server-ip-btn" title="Нажмите, чтобы скопировать">
-        <span id="server-ip-text">eternum.aurorix.pro</span>
+        <span id="server-ip-text">d5.aurorix.net:19804</span>
         <span class="copy-icon">📋</span>
       </div>
     </section>
@@ -87,22 +90,6 @@
           </div>
         </div>
       </div>
-
-      <!-- RAM Allocation Slider -->
-      <div class="ram-control-box">
-        <div class="ram-header">
-          <span>Выделение оперативной памяти (RAM):</span>
-          <span class="ram-value" id="ram-display">6 GB</span>
-        </div>
-        <input type="range" id="ram-slider" min="2" max="16" step="1" value="6" />
-        <div class="ram-ticks">
-          <span>2 GB</span>
-          <span>4 GB</span>
-          <span>8 GB</span>
-          <span>12 GB</span>
-          <span>16 GB</span>
-        </div>
-      </div>
     </section>
 
     <!-- Bottom Action Bar -->
@@ -120,8 +107,8 @@
 
       <!-- Play Button -->
       <button id="btn-play" class="btn-play">
-        <span class="play-icon">▶</span>
-        <span class="play-text">ИГРАТЬ</span>
+        <span class="play-icon" id="play-icon">▶</span>
+        <span class="play-text" id="play-text">ИГРАТЬ</span>
       </button>
     </footer>
   </main>
@@ -133,7 +120,7 @@
       <button id="btn-logs-close" class="close-logs-btn">✕</button>
     </div>
     <div class="logs-content" id="logs-content">
-      <div class="log-line info">[System] AstralForge Launcher инициализирован.</div>
+      <div class="log-line info">[System] Eternum Launcher инициализирован.</div>
     </div>
   </div>
 
@@ -145,12 +132,34 @@
         <button id="btn-modal-close" class="close-btn">✕</button>
       </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label>URL манифеста (GitHub raw):</label>
-          <input type="text" id="setting-manifest-url" value="https://raw.githubusercontent.com/YourGithubUsername/astralforge-repo/main/manifest.json" />
+        <div class="ram-control-box">
+          <div class="ram-header">
+            <span>Оперативная память (RAM)</span>
+            <div class="ram-stepper">
+              <button type="button" class="ram-step-btn" id="ram-dec" title="Уменьшить">−</button>
+              <div class="ram-input-wrap">
+                <input type="number" id="ram-input" min="2" max="32" step="1" value="6" />
+                <span class="ram-unit">GB</span>
+              </div>
+              <button type="button" class="ram-step-btn" id="ram-inc" title="Увеличить">+</button>
+            </div>
+          </div>
+          <div class="ram-presets" id="ram-presets">
+            <button type="button" class="ram-preset-btn" data-ram="2">2 GB</button>
+            <button type="button" class="ram-preset-btn" data-ram="4">4 GB</button>
+            <button type="button" class="ram-preset-btn" data-ram="6">6 GB</button>
+            <button type="button" class="ram-preset-btn" data-ram="8">8 GB</button>
+            <button type="button" class="ram-preset-btn" data-ram="10">10 GB</button>
+            <button type="button" class="ram-preset-btn" data-ram="12">12 GB</button>
+            <button type="button" class="ram-preset-btn" data-ram="16">16 GB</button>
+          </div>
         </div>
         <div class="form-group">
-          <label>Путь к Java 21+:</label>
+          <label>URL манифеста (GitHub raw):</label>
+          <input type="text" id="setting-manifest-url" value="https://raw.githubusercontent.com/meed0ff/eternum-modpack/main/manifest.json" />
+        </div>
+        <div class="form-group">
+          <label>Путь к Java:</label>
           <input type="text" id="setting-java-path" placeholder="Автоопределение (java)" value="java" />
         </div>
         <div class="form-group">

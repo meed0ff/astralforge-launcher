@@ -7,6 +7,8 @@ pub struct ManifestFile {
     pub url: String,
     pub sha256: String,
     pub size: u64,
+    #[serde(default, rename = "extractTo")]
+    pub extract_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +40,8 @@ pub struct ElybyConfig {
 pub struct Manifest {
     #[serde(rename = "schemaVersion")]
     pub schema_version: u32,
+    #[serde(default, rename = "packVersion")]
+    pub pack_version: Option<String>,
     pub server: ServerConfig,
     pub minecraft: MinecraftConfig,
     pub loader: LoaderConfig,

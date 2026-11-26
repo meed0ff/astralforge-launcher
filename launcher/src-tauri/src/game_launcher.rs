@@ -5,12 +5,66 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::oneshot;
 
-pub const AUTHLIB_INJECTOR_URL: &str = "https://authlib-injector.yggdrasil.co/artifact/latest.jar";
-pub const ELYBY_AUTH_SERVER: &str = "https://authlib.ely.by/api/yggdrasil";
+static NEXT_GAME_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Default)]
+pub struct RunningGameState {
+    inner: Arc<Mutex<Option<RunningGameHandle>>>,
+}
+
+struct RunningGameHandle {
+    id: u64,
+    kill_tx: Option<oneshot::Sender<()>>,
+}
+
+impl RunningGameState {
+    pub fn is_running(&self) -> bool {
+        self.inner.lock().map(|guard| guard.is_some()).unwrap_or(false)
+    }
+
+    fn set_running(&self, kill_tx: oneshot::Sender<()>) -> u64 {
+        let id = NEXT_GAME_ID.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(RunningGameHandle {
+            id,
+            kill_tx: Some(kill_tx),
+        });
+        id
+    }
+
+    fn clear_if_matches(&self, id: u64) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_some_and(|h| h.id == id) {
+            *guard = None;
+        }
+    }
+
+    pub fn stop(&self) -> Result<(), String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(handle) = guard.as_mut() else {
+            return Err("Игра сейчас не запущена.".into());
+        };
+        if let Some(tx) = handle.kill_tx.take() {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
+}
+
+pub const AUTHLIB_INJECTOR_META_URLS: &[&str] = &[
+    "https://authlib-injector.yushi.moe/artifact/latest.json",
+    "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json",
+];
+pub const AUTHLIB_INJECTOR_GITHUB_API_URL: &str =
+    "https://api.github.com/repos/yushijinhun/authlib-injector/releases/latest";
+pub const ELYBY_AUTH_SERVER: &str = "https://authserver.ely.by";
 pub const MOJANG_VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
@@ -20,6 +74,16 @@ pub fn get_game_dir() -> PathBuf {
     } else {
         PathBuf::from(".astralforge")
     }
+}
+
+fn apply_no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 fn current_os_name() -> &'static str {
@@ -243,7 +307,10 @@ fn parse_java_major_version(version_output: &str) -> Option<u32> {
 }
 
 async fn check_java_version(java_bin: &Path) -> Option<u32> {
-    let output = Command::new(java_bin).arg("-version").output().await.ok()?;
+    let mut cmd = Command::new(java_bin);
+    cmd.arg("-version");
+    apply_no_window(&mut cmd);
+    let output = cmd.output().await.ok()?;
     if !output.status.success() {
         return None;
     }
@@ -292,6 +359,12 @@ fn collect_java_candidates(game_dir: &Path, required_major: u32) -> Vec<PathBuf>
         search_roots.push(PathBuf::from("C:\\Program Files\\Java"));
         search_roots.push(PathBuf::from("C:\\Program Files\\Eclipse Adoptium"));
         search_roots.push(PathBuf::from("C:\\Program Files\\Microsoft"));
+        if let Some(local_app_data) = dirs::data_local_dir() {
+            let programs = local_app_data.join("Programs");
+            search_roots.push(programs.join("Eclipse Adoptium"));
+            search_roots.push(programs.join("Java"));
+            search_roots.push(programs.join("Microsoft"));
+        }
     }
 
     for root in search_roots {
@@ -425,26 +498,22 @@ pub async fn resolve_or_install_java(
         },
     );
 
-    let extract_status = if cfg!(windows) {
-        Command::new("tar")
-            .arg("-xf")
-            .arg(&archive_path)
-            .arg("-C")
-            .arg(&target_java_dir)
-            .arg("--strip-components=1")
-            .status()
-            .await
+    let mut extract_cmd = Command::new("tar");
+    if cfg!(windows) {
+        extract_cmd.arg("-xf");
     } else {
-        Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive_path)
-            .arg("-C")
-            .arg(&target_java_dir)
-            .arg("--strip-components=1")
-            .status()
-            .await
+        extract_cmd.arg("-xzf");
     }
-    .map_err(|e| format!("Не удалось распаковать Java: {}", e))?;
+    extract_cmd
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&target_java_dir)
+        .arg("--strip-components=1");
+    apply_no_window(&mut extract_cmd);
+    let extract_status = extract_cmd
+        .status()
+        .await
+        .map_err(|e| format!("Не удалось распаковать Java: {}", e))?;
 
     let _ = std::fs::remove_file(&archive_path);
 
@@ -464,8 +533,112 @@ pub async fn resolve_or_install_java(
     Ok(installed_java.to_string_lossy().to_string())
 }
 
-/// Устанавливает NeoForge headlessly, если он еще не установлен, и возвращает путь к подходящей Java
-pub async fn ensure_neoforge_installed(
+fn loader_profile_name(loader_type: &str, mc_version: &str, loader_version: &str) -> String {
+    if loader_type.eq_ignore_ascii_case("fabric") {
+        format!("fabric-loader-{}-{}", loader_version, mc_version)
+    } else {
+        format!("neoforge-{}", loader_version)
+    }
+}
+
+/// Устанавливает Fabric Loader (профиль и библиотеки) и возвращает путь к подходящей Java
+async fn ensure_fabric_installed(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    game_dir: &Path,
+    mc_version: &str,
+    fabric_version: &str,
+    installer_url: Option<&str>,
+    resolved_java: String,
+) -> Result<String, String> {
+    let profile_name = loader_profile_name("fabric", mc_version, fabric_version);
+    let version_dir = game_dir.join("versions").join(&profile_name);
+    let version_json_path = version_dir.join(format!("{}.json", profile_name));
+    std::fs::create_dir_all(&version_dir).map_err(|e| e.to_string())?;
+
+    if !version_json_path.exists() {
+        let profile_url = installer_url
+            .filter(|u| !u.trim().is_empty())
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
+                    mc_version, fabric_version
+                )
+            });
+
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 87,
+                status: format!("Получение профиля Fabric {}...", fabric_version),
+                log: Some(format!("Загрузка метаданных Fabric: {}", profile_url)),
+            },
+        );
+        download_file(client, &profile_url, &version_json_path, "").await?;
+    }
+
+    let json_text = std::fs::read_to_string(&version_json_path).map_err(|e| e.to_string())?;
+    let fabric_json: Value = serde_json::from_str(&json_text).map_err(|e| e.to_string())?;
+
+    let libraries_dir = game_dir.join("libraries");
+    let mut lib_downloads = Vec::new();
+    if let Some(libs) = fabric_json["libraries"].as_array() {
+        for lib in libs {
+            if let Some(name) = lib["name"].as_str() {
+                if let Some(rel_path) = maven_coords_to_path(name) {
+                    let target = libraries_dir.join(&rel_path);
+                    if !target.exists() {
+                        let base_url = lib["url"]
+                            .as_str()
+                            .unwrap_or("https://maven.fabricmc.net/");
+                        let normalized_base = if base_url.ends_with('/') {
+                            base_url.to_string()
+                        } else {
+                            format!("{}/", base_url)
+                        };
+                        lib_downloads.push((normalized_base, rel_path, target));
+                    }
+                }
+            }
+        }
+    }
+
+    if !lib_downloads.is_empty() {
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 90,
+                status: format!("Скачивание библиотек Fabric ({} шт.)...", lib_downloads.len()),
+                log: Some(format!("Загрузка {} библиотек Fabric...", lib_downloads.len())),
+            },
+        );
+        let results: Vec<Result<(), String>> = stream::iter(lib_downloads)
+            .map(|(base_url, rel_path, target)| async move {
+                let primary_url = format!("{}{}", base_url, rel_path);
+                if download_file(client, &primary_url, &target, "").await.is_ok() {
+                    return Ok(());
+                }
+                let mc_fallback = format!("https://libraries.minecraft.net/{}", rel_path);
+                if download_file(client, &mc_fallback, &target, "").await.is_ok() {
+                    return Ok(());
+                }
+                let maven_fallback = format!("https://repo1.maven.org/maven2/{}", rel_path);
+                download_file(client, &maven_fallback, &target, "").await
+            })
+            .buffer_unordered(12)
+            .collect()
+            .await;
+        for res in results {
+            res?;
+        }
+    }
+
+    Ok(resolved_java)
+}
+
+/// Устанавливает выбранный модлоадер (Fabric или NeoForge) и возвращает путь к подходящей Java
+pub async fn ensure_loader_installed(
     app: &AppHandle,
     client: &reqwest::Client,
     game_dir: &Path,
@@ -481,6 +654,24 @@ pub async fn ensure_neoforge_installed(
     // 2. Автопоиск или скачивание нужной версии Java
     let resolved_java =
         resolve_or_install_java(app, client, game_dir, java_path, required_java).await?;
+
+    let loader_type = manifest.loader.loader_type.to_lowercase();
+    if loader_type == "fabric" {
+        return ensure_fabric_installed(
+            app,
+            client,
+            game_dir,
+            &manifest.minecraft.version,
+            &manifest.loader.version,
+            manifest.loader.installer_url.as_deref(),
+            resolved_java,
+        )
+        .await;
+    }
+
+    if loader_type != "neoforge" {
+        return Err(format!("Неподдерживаемый тип загрузчика: {}", manifest.loader.loader_type));
+    }
 
     let neoforge_version = &manifest.loader.version;
     let version_dir = game_dir
@@ -527,12 +718,15 @@ pub async fn ensure_neoforge_installed(
     );
 
     let game_dir_str = game_dir.to_string_lossy().to_string();
-    let output = tokio::process::Command::new(&resolved_java)
+    let mut installer_cmd = tokio::process::Command::new(&resolved_java);
+    installer_cmd
         .arg("-jar")
         .arg(&installer_path)
         .arg("--install-client")
         .arg(&game_dir_str)
-        .current_dir(game_dir)
+        .current_dir(game_dir);
+    apply_no_window(&mut installer_cmd);
+    let output = installer_cmd
         .output()
         .await
         .map_err(|e| format!("Не удалось запустить Java для установки NeoForge: {}", e))?;
@@ -550,16 +744,111 @@ pub async fn ensure_neoforge_installed(
     Ok(resolved_java)
 }
 
+async fn download_authlib_from_meta(
+    client: &reqwest::Client,
+    meta_url: &str,
+    target: &Path,
+) -> Result<(), String> {
+    let resp = client
+        .get(meta_url)
+        .header("User-Agent", "AstralForge-Launcher/1.0")
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к {}: {}", meta_url, e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Ошибка ответа {}: статус {}", meta_url, resp.status()));
+    }
+
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Ошибка разбора JSON {}: {}", meta_url, e))?;
+
+    let download_url = json["download_url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("В ответе {} отсутствует download_url", meta_url))?;
+    let sha256 = json["checksums"]["sha256"].as_str().unwrap_or("");
+
+    download_file(client, download_url, target, sha256).await
+}
+
+async fn download_authlib_from_github(
+    client: &reqwest::Client,
+    target: &Path,
+) -> Result<(), String> {
+    let resp = client
+        .get(AUTHLIB_INJECTOR_GITHUB_API_URL)
+        .header("User-Agent", "AstralForge-Launcher/1.0")
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к {}: {}", AUTHLIB_INJECTOR_GITHUB_API_URL, e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Ошибка ответа {}: статус {}",
+            AUTHLIB_INJECTOR_GITHUB_API_URL,
+            resp.status()
+        ));
+    }
+
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Ошибка разбора GitHub Release JSON: {}", e))?;
+
+    let asset = json["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets.iter().find(|a| {
+                a["name"]
+                    .as_str()
+                    .map_or(false, |name| name.ends_with(".jar"))
+            })
+        })
+        .ok_or_else(|| "В последнем релизе authlib-injector на GitHub не найден .jar".to_string())?;
+
+    let download_url = asset["browser_download_url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Отсутствует browser_download_url в релизе GitHub".to_string())?;
+    let sha256 = asset["digest"]
+        .as_str()
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .unwrap_or("");
+
+    download_file(client, download_url, target, sha256).await
+}
+
 /// Обеспечивает наличие authlib-injector для поддержки скинов и входа Ely.by
 pub async fn ensure_authlib_injector(
     client: &reqwest::Client,
     game_dir: &Path,
 ) -> Result<PathBuf, String> {
     let target = game_dir.join("authlib-injector.jar");
-    if !target.exists() {
-        download_file(client, AUTHLIB_INJECTOR_URL, &target, "").await?;
+    if target.exists() && target.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(target);
     }
-    Ok(target)
+
+    let mut errors = Vec::new();
+    for meta_url in AUTHLIB_INJECTOR_META_URLS {
+        match download_authlib_from_meta(client, meta_url, &target).await {
+            Ok(()) => return Ok(target),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    match download_authlib_from_github(client, &target).await {
+        Ok(()) => Ok(target),
+        Err(err) => {
+            errors.push(err);
+            Err(format!(
+                "Не удалось скачать authlib-injector ни с одного источника:\n{}",
+                errors.join("\n")
+            ))
+        }
+    }
 }
 
 fn maven_coords_to_path(coords: &str) -> Option<String> {
@@ -648,10 +937,11 @@ fn collect_arguments(args_arr: Option<&Vec<Value>>, vars: &HashMap<&str, String>
     result
 }
 
-/// Запуск процесса Minecraft (NeoForge 1.21.1 через BootstrapLauncher)
+/// Запуск процесса Minecraft (Fabric / NeoForge)
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_minecraft(
     app: &AppHandle,
+    running_state: RunningGameState,
     game_dir: &Path,
     java_path: &str,
     ram_gb: u32,
@@ -661,7 +951,8 @@ pub async fn launch_minecraft(
     access_token: &str,
     server_ip: &str,
     mc_version: &str,
-    neoforge_ver: &str,
+    loader_type: &str,
+    loader_ver: &str,
     authlib_path: Option<&Path>,
 ) -> Result<(), String> {
     let _ = app.emit(
@@ -673,19 +964,19 @@ pub async fn launch_minecraft(
         },
     );
 
-    let neoforge_ver_name = format!("neoforge-{}", neoforge_ver);
-    let nf_json_path = game_dir
+    let loader_ver_name = loader_profile_name(loader_type, mc_version, loader_ver);
+    let loader_json_path = game_dir
         .join("versions")
-        .join(&neoforge_ver_name)
-        .join(format!("{}.json", neoforge_ver_name));
+        .join(&loader_ver_name)
+        .join(format!("{}.json", loader_ver_name));
     let mc_json_path = game_dir
         .join("versions")
         .join(mc_version)
         .join(format!("{}.json", mc_version));
 
-    let nf_json: Value = serde_json::from_str(
-        &std::fs::read_to_string(&nf_json_path)
-            .map_err(|e| format!("Не найден профиль NeoForge {}: {}", nf_json_path.display(), e))?,
+    let loader_json: Value = serde_json::from_str(
+        &std::fs::read_to_string(&loader_json_path)
+            .map_err(|e| format!("Не найден профиль загрузчика {}: {}", loader_json_path.display(), e))?,
     )
     .map_err(|e| e.to_string())?;
 
@@ -698,7 +989,7 @@ pub async fn launch_minecraft(
     let libraries_dir = game_dir.join("libraries");
     let mut seen_jars = HashSet::new();
     let mut classpath_entries = Vec::new();
-    collect_libraries_from_json(&nf_json, &libraries_dir, &mut seen_jars, &mut classpath_entries);
+    collect_libraries_from_json(&loader_json, &libraries_dir, &mut seen_jars, &mut classpath_entries);
     collect_libraries_from_json(&mc_json, &libraries_dir, &mut seen_jars, &mut classpath_entries);
 
     let client_jar = game_dir
@@ -718,9 +1009,12 @@ pub async fn launch_minecraft(
 
     let natives_dir = game_dir
         .join("versions")
-        .join(&neoforge_ver_name)
+        .join(&loader_ver_name)
         .join("natives");
-    let _ = std::fs::create_dir_all(&natives_dir);
+    let _ = std::fs::create_dir_all(natives_dir.join("java"));
+    let _ = std::fs::create_dir_all(natives_dir.join("jna"));
+    let _ = std::fs::create_dir_all(natives_dir.join("lwjgl"));
+    let _ = std::fs::create_dir_all(natives_dir.join("netty"));
 
     let asset_index_id = mc_json["assetIndex"]["id"]
         .as_str()
@@ -729,12 +1023,12 @@ pub async fn launch_minecraft(
 
     let mut vars: HashMap<&str, String> = HashMap::new();
     vars.insert("natives_directory", natives_dir.to_string_lossy().to_string());
-    vars.insert("launcher_name", "AstralForge".to_string());
+    vars.insert("launcher_name", "Eternum".to_string());
     vars.insert("launcher_version", "1.0.0".to_string());
     vars.insert("classpath", classpath_str.clone());
     vars.insert("library_directory", libraries_dir.to_string_lossy().to_string());
     vars.insert("classpath_separator", classpath_sep.to_string());
-    vars.insert("version_name", neoforge_ver_name.clone());
+    vars.insert("version_name", loader_ver_name.clone());
     vars.insert("auth_player_name", nickname.to_string());
     vars.insert("game_directory", game_dir.to_string_lossy().to_string());
     vars.insert("assets_root", game_dir.join("assets").to_string_lossy().to_string());
@@ -764,17 +1058,22 @@ pub async fn launch_minecraft(
     }
 
     let mut mc_jvm = collect_arguments(mc_json["arguments"]["jvm"].as_array(), &vars);
-    let mut nf_jvm = collect_arguments(nf_json["arguments"]["jvm"].as_array(), &vars);
+    let mut loader_jvm = collect_arguments(loader_json["arguments"]["jvm"].as_array(), &vars);
     jvm_args.append(&mut mc_jvm);
-    jvm_args.append(&mut nf_jvm);
+    jvm_args.append(&mut loader_jvm);
 
-    let main_class = nf_json["mainClass"]
+    let default_main = if loader_type.eq_ignore_ascii_case("fabric") {
+        "net.fabricmc.loader.impl.launch.knot.KnotClient"
+    } else {
+        "cpw.mods.bootstraplauncher.BootstrapLauncher"
+    };
+    let main_class = loader_json["mainClass"]
         .as_str()
-        .unwrap_or("cpw.mods.bootstraplauncher.BootstrapLauncher");
+        .unwrap_or(default_main);
 
     let mut game_args = collect_arguments(mc_json["arguments"]["game"].as_array(), &vars);
-    let mut nf_game = collect_arguments(nf_json["arguments"]["game"].as_array(), &vars);
-    game_args.append(&mut nf_game);
+    let mut loader_game = collect_arguments(loader_json["arguments"]["game"].as_array(), &vars);
+    game_args.append(&mut loader_game);
 
     if !server_ip.is_empty() {
         game_args.push("--quickPlayMultiplayer".to_string());
@@ -788,6 +1087,7 @@ pub async fn launch_minecraft(
     cmd.args(&game_args);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    apply_no_window(&mut cmd);
 
     let _ = app.emit(
         "download-progress",
@@ -801,6 +1101,10 @@ pub async fn launch_minecraft(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Не удалось запустить процесс Minecraft: {}", e))?;
+
+    let (kill_tx, kill_rx) = oneshot::channel();
+    let game_id = running_state.set_running(kill_tx);
+    let _ = app.emit("game-started", ());
 
     if let Some(stdout) = child.stdout.take() {
         let app_handle = app.clone();
@@ -824,9 +1128,25 @@ pub async fn launch_minecraft(
 
     let app_handle = app.clone();
     tokio::spawn(async move {
-        if let Ok(status) = child.wait().await {
-            let _ = app_handle.emit("game-log", format!("Процесс игры завершился ({})", status));
+        tokio::select! {
+            wait_res = child.wait() => {
+                match wait_res {
+                    Ok(status) => {
+                        let _ = app_handle.emit("game-log", format!("Процесс игры завершился ({})", status));
+                    }
+                    Err(err) => {
+                        let _ = app_handle.emit("game-log", format!("Ошибка ожидания процесса игры: {}", err));
+                    }
+                }
+            }
+            _ = kill_rx => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = app_handle.emit("game-log", "Процесс игры остановлен пользователем.");
+            }
         }
+        running_state.clear_if_matches(game_id);
+        let _ = app_handle.emit("game-stopped", ());
     });
 
     Ok(())

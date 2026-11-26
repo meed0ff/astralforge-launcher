@@ -92,7 +92,7 @@ pub async fn ping_server(host: &str, port: u16) -> Result<ServerStatus, String> 
 
     let online_players = v["players"]["online"].as_u64().unwrap_or(0) as u32;
     let max_players = v["players"]["max"].as_u64().unwrap_or(0) as u32;
-    let motd = v["description"]["text"].as_str().unwrap_or("AstralForge").to_string();
+    let motd = v["description"]["text"].as_str().unwrap_or("Eternum").to_string();
 
     Ok(ServerStatus {
         online: true,
