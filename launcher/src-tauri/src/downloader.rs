@@ -540,12 +540,103 @@ pub async fn download_file_tracked(
     Ok(file_downloaded)
 }
 
+pub fn resolve_mirror_urls(url: &str, mirror_source: &str) -> (String, Option<String>) {
+    let trimmed = url.trim();
+    let use_gitlab = mirror_source.eq_ignore_ascii_case("gitlab");
+
+    if let Some(rest) = trimmed.strip_prefix("https://raw.githubusercontent.com/") {
+        let mut parts = rest.splitn(4, '/');
+        if let (Some(owner), Some(repo), Some(branch), Some(path)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            let gitlab_url = format!("https://gitlab.com/{}/{}/-/raw/{}/{}", owner, repo, branch, path);
+            return if use_gitlab {
+                (gitlab_url, Some(trimmed.to_string()))
+            } else {
+                (trimmed.to_string(), Some(gitlab_url))
+            };
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("https://gitlab.com/") {
+        if let Some((repo_path, raw_rest)) = rest.split_once("/-/raw/") {
+            let github_url = format!("https://raw.githubusercontent.com/{}/{}", repo_path, raw_rest);
+            return if use_gitlab {
+                (trimmed.to_string(), Some(github_url))
+            } else {
+                (github_url, Some(trimmed.to_string()))
+            };
+        }
+    }
+
+    (trimmed.to_string(), None)
+}
+
+async fn download_with_mirror(
+    client: &reqwest::Client,
+    primary_url: &str,
+    fallback_url: Option<&str>,
+    target_path: &Path,
+    expected_sha256: &str,
+    app: Option<&AppHandle>,
+    display_name: &str,
+    known_size: u64,
+    total_downloaded_so_far: u64,
+    total_bytes: u64,
+    smooth_speed_bps: &mut u64,
+) -> Result<u64, String> {
+    match download_file_with_progress(
+        client,
+        primary_url,
+        target_path,
+        expected_sha256,
+        app,
+        display_name,
+        known_size,
+        total_downloaded_so_far,
+        total_bytes,
+        smooth_speed_bps,
+    )
+    .await
+    {
+        Ok(bytes) => Ok(bytes),
+        Err(primary_err) => {
+            if let Some(fb) = fallback_url {
+                if let Some(handle) = app {
+                    let _ = handle.emit(
+                        "download-progress",
+                        ProgressPayload {
+                            percent: 35,
+                            status: "Переключение на резервное зеркало...".into(),
+                            log: Some(format!("⚠ Основное зеркало недоступно ({}), пробуем резерв...", primary_err)),
+                        },
+                    );
+                }
+                download_file_with_progress(
+                    client,
+                    fb,
+                    target_path,
+                    expected_sha256,
+                    app,
+                    display_name,
+                    known_size,
+                    total_downloaded_so_far,
+                    total_bytes,
+                    smooth_speed_bps,
+                )
+                .await
+            } else {
+                Err(primary_err)
+            }
+        }
+    }
+}
+
 /// Синхронизирует файлы сборки (моды, конфиги, ресурспаки, шейдеры, kubejs и zip-бандлы)
 pub async fn sync_files(
     app: &AppHandle,
     client: &reqwest::Client,
     game_dir: &Path,
     files: &[ManifestFile],
+    mirror_source: &str,
 ) -> Result<(), String> {
     let (total_pack_bytes, needed_bytes) = estimate_sync_sizes(game_dir, files);
     if let Some(free_bytes) = get_available_disk_space(game_dir) {
@@ -586,8 +677,15 @@ pub async fn sync_files(
         } else {
             30 + ((idx as f32 / total.max(1) as f32) * 45.0) as u32
         };
+        let (primary_url, fallback_url) = if file_entry.source == "modrinth" {
+            (file_entry.url.clone(), None)
+        } else {
+            resolve_mirror_urls(&file_entry.url, mirror_source)
+        };
         let src_label = if file_entry.source == "modrinth" {
             "Modrinth CDN"
+        } else if primary_url.starts_with("https://gitlab.com/") {
+            "GitLab"
         } else {
             "GitHub"
         };
@@ -612,9 +710,10 @@ pub async fn sync_files(
                 );
 
                 let tmp_zip = game_dir.join(".bundles").join("bundle.zip.tmp");
-                let dl = download_file_with_progress(
+                let dl = download_with_mirror(
                     client,
-                    &file_entry.url,
+                    &primary_url,
+                    fallback_url.as_deref(),
                     &tmp_zip,
                     &file_entry.sha256,
                     Some(app),
@@ -664,9 +763,10 @@ pub async fn sync_files(
                 },
             );
 
-            let dl = download_file_with_progress(
+            let dl = download_with_mirror(
                 client,
-                &file_entry.url,
+                &primary_url,
+                fallback_url.as_deref(),
                 &local_path,
                 &file_entry.sha256,
                 Some(app),

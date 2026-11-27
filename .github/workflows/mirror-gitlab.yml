@@ -1,0 +1,41 @@
+name: Mirror to GitLab
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: gitlab-mirror-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror Repository & Tags to GitLab
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify GITLAB_TOKEN secret
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN secret is not set. Skipping GitLab mirror."
+            exit 1
+          fi
+
+      - name: Push main branch and tags to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
+          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.com/meed0ff/eternum-launcher.git"
+          git push --force gitlab refs/remotes/origin/main:refs/heads/main
+          git push --force gitlab --tags

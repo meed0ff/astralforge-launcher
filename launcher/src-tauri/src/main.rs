@@ -14,6 +14,10 @@ use server_ping::ServerStatus;
 use std::fs;
 use tauri::{AppHandle, Emitter};
 
+fn default_mirror_source() -> String {
+    "github".into()
+}
+
 #[derive(serde::Deserialize)]
 pub struct LaunchRequest {
     pub nickname: String,
@@ -28,6 +32,8 @@ pub struct LaunchRequest {
     pub java_path: String,
     #[serde(rename = "manifestUrl")]
     pub manifest_url: String,
+    #[serde(default = "default_mirror_source", rename = "mirrorSource")]
+    pub mirror_source: String,
 }
 
 #[tauri::command]
@@ -75,24 +81,54 @@ pub struct ManifestSummary {
     pub enough_disk_space: Option<bool>,
 }
 
+async fn fetch_manifest_json(
+    client: &reqwest::Client,
+    manifest_url: &str,
+    mirror_source: &str,
+) -> Result<(Manifest, String), String> {
+    let (primary, fallback) = downloader::resolve_mirror_urls(manifest_url, mirror_source);
+
+    let try_fetch = |url: String| async move {
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Не удалось загрузить манифест ({}): {}", url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("Статус ответа манифеста ({}): {}", url, resp.status()));
+        }
+        let manifest: Manifest = resp
+            .json()
+            .await
+            .map_err(|e| format!("Ошибка разбора манифеста: {}", e))?;
+        Ok((manifest, url))
+    };
+
+    match try_fetch(primary).await {
+        Ok(res) => Ok(res),
+        Err(primary_err) => {
+            if let Some(fb) = fallback {
+                try_fetch(fb).await.map_err(|fb_err| {
+                    format!("{}\nРезервное зеркало: {}", primary_err, fb_err)
+                })
+            } else {
+                Err(primary_err)
+            }
+        }
+    }
+}
+
 #[tauri::command]
-async fn fetch_manifest_info(manifest_url: String) -> Result<ManifestSummary, String> {
+async fn fetch_manifest_info(
+    manifest_url: String,
+    mirror_source: Option<String>,
+) -> Result<ManifestSummary, String> {
     let client = reqwest::Client::builder()
         .user_agent("Eternum-Launcher/1.0")
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
-        .get(&manifest_url)
-        .send()
-        .await
-        .map_err(|e| format!("Не удалось загрузить манифест: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Статус ответа манифеста: {}", resp.status()));
-    }
-    let manifest: Manifest = resp
-        .json()
-        .await
-        .map_err(|e| format!("Ошибка разбора манифеста: {}", e))?;
+    let mirror = mirror_source.as_deref().unwrap_or("github");
+    let (manifest, _) = fetch_manifest_json(&client, &manifest_url, mirror).await?;
 
     let game_dir = game_launcher::get_game_dir();
     let (total_pack_bytes, needed_bytes) = downloader::estimate_sync_sizes(&game_dir, &manifest.files);
@@ -141,30 +177,36 @@ async fn start_sync_and_launch(
         .build()
         .map_err(|e| e.to_string())?;
 
+    let (primary_manifest_url, _) =
+        downloader::resolve_mirror_urls(&request.manifest_url, &request.mirror_source);
+    let source_label = if request.mirror_source.eq_ignore_ascii_case("gitlab") {
+        "GitLab"
+    } else {
+        "GitHub"
+    };
+
     let _ = app.emit(
         "download-progress",
         ProgressPayload {
             percent: 5,
-            status: "Загрузка манифеста сборки с GitHub...".into(),
-            log: Some(format!("Запрос манифеста: {}", request.manifest_url)),
+            status: format!("Загрузка манифеста сборки ({})...", source_label),
+            log: Some(format!("Запрос манифеста: {}", primary_manifest_url)),
         },
     );
 
-    // 1. Скачиваем manifest.json
-    let manifest_resp = client
-        .get(&request.manifest_url)
-        .send()
-        .await
-        .map_err(|e| format!("Не удалось скачать манифест: {}", e))?;
-
-    if !manifest_resp.status().is_success() {
-        return Err(format!("Ошибка ответа манифеста: статус {}", manifest_resp.status()));
+    // 1. Скачиваем manifest.json (с резервом на второе зеркало)
+    let (manifest, used_manifest_url) =
+        fetch_manifest_json(&client, &request.manifest_url, &request.mirror_source).await?;
+    if used_manifest_url != primary_manifest_url {
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 10,
+                status: "Переключение на резервное зеркало манифеста...".into(),
+                log: Some(format!("Используется резервный URL: {}", used_manifest_url)),
+            },
+        );
     }
-
-    let manifest: Manifest = manifest_resp
-        .json()
-        .await
-        .map_err(|e| format!("Ошибка разбора манифеста: {}", e))?;
 
     let game_dir = game_launcher::get_game_dir();
     fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
@@ -178,8 +220,9 @@ async fn start_sync_and_launch(
         },
     );
 
-    // 2. Синхронизируем файлы сборки (Modrinth CDN + GitHub)
-    downloader::sync_files(&app, &client, &game_dir, &manifest.files).await?;
+    // 2. Синхронизируем файлы сборки (Modrinth CDN + GitHub/GitLab)
+    downloader::sync_files(&app, &client, &game_dir, &manifest.files, &request.mirror_source)
+        .await?;
 
     // 3. Проверяем/скачиваем нужную Java и устанавливаем загрузчик (Fabric / NeoForge)
     let resolved_java = game_launcher::ensure_loader_installed(

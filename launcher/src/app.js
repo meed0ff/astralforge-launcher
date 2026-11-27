@@ -69,6 +69,8 @@ const settingsModal = document.getElementById("settings-modal");
 const btnModalClose = document.getElementById("btn-modal-close");
 const btnSaveSettings = document.getElementById("btn-save-settings");
 const settingManifestUrl = document.getElementById("setting-manifest-url");
+const mirrorBtns = Array.from(document.querySelectorAll(".mirror-btn"));
+let currentMirror = "github";
 const settingJavaPath = document.getElementById("setting-java-path");
 const btnOpenGameFolder = document.getElementById("btn-open-game-folder");
 
@@ -258,12 +260,46 @@ btnLogsClose.addEventListener("click", () => logsDrawer.classList.remove("open")
 btnSettings.addEventListener("click", () => settingsModal.classList.remove("hidden"));
 btnModalClose.addEventListener("click", () => settingsModal.classList.add("hidden"));
 
+function convertManifestMirrorUrl(url, mirror) {
+  const trimmed = (url || "").trim();
+  if (!trimmed) return trimmed;
+  if (mirror === "gitlab") {
+    const ghMatch = trimmed.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/);
+    if (ghMatch) {
+      return `https://gitlab.com/${ghMatch[1]}/${ghMatch[2]}/-/raw/${ghMatch[3]}/${ghMatch[4]}`;
+    }
+  } else {
+    const glMatch = trimmed.match(/^https:\/\/gitlab\.com\/(.+?)\/-\/raw\/(.+)$/);
+    if (glMatch) {
+      return `https://raw.githubusercontent.com/${glMatch[1]}/${glMatch[2]}`;
+    }
+  }
+  return trimmed;
+}
+
+function setMirrorSource(mirror, updateUrl = true) {
+  currentMirror = mirror === "gitlab" ? "gitlab" : "github";
+  for (const btn of mirrorBtns) {
+    btn.classList.toggle("active", btn.dataset.mirror === currentMirror);
+  }
+  if (updateUrl && settingManifestUrl) {
+    settingManifestUrl.value = convertManifestMirrorUrl(settingManifestUrl.value, currentMirror);
+  }
+}
+
+for (const btn of mirrorBtns) {
+  btn.addEventListener("click", () => {
+    setMirrorSource(btn.dataset.mirror, true);
+  });
+}
+
 btnSaveSettings.addEventListener("click", () => {
   setRamGb(ramInput ? ramInput.value : currentRamGb);
+  localStorage.setItem("astral_mirror", currentMirror);
   localStorage.setItem("astral_manifest_url", settingManifestUrl.value);
   localStorage.setItem("astral_java_path", settingJavaPath.value);
   settingsModal.classList.add("hidden");
-  addLog("Настройки сохранены.");
+  addLog(`Настройки сохранены (зеркало: ${currentMirror === "gitlab" ? "GitLab" : "GitHub"}).`);
   showToast("Настройки сохранены", "success");
   refreshManifestMetadata();
 });
@@ -369,7 +405,8 @@ btnPlay.addEventListener("click", async () => {
     accessToken,
     ramGb: currentRamGb,
     javaPath: settingJavaPath.value.trim() || "java",
-    manifestUrl: settingManifestUrl.value.trim()
+    manifestUrl: settingManifestUrl.value.trim(),
+    mirrorSource: currentMirror
   };
 
   if (hasTauri) {
@@ -442,7 +479,7 @@ function refreshManifestMetadata() {
   if (!hasTauri || !window.__TAURI__.core) return;
   const manifestUrl = settingManifestUrl.value.trim();
   if (!manifestUrl) return;
-  window.__TAURI__.core.invoke("fetch_manifest_info", { manifestUrl })
+  window.__TAURI__.core.invoke("fetch_manifest_info", { manifestUrl, mirrorSource: currentMirror })
     .then((info) => {
       const loaderLabel = info.loader_type.charAt(0).toUpperCase() + info.loader_type.slice(1);
       if (versionBadgeEl) {
@@ -508,9 +545,14 @@ function initLauncher() {
     }
 
     // Restore Settings
+    const savedMirror = localStorage.getItem("astral_mirror");
+    setMirrorSource(savedMirror || "github", false);
+
     const savedManifestUrl = localStorage.getItem("astral_manifest_url");
     if (savedManifestUrl && !savedManifestUrl.includes("YourGithubUsername")) {
       settingManifestUrl.value = savedManifestUrl;
+    } else if (currentMirror === "gitlab") {
+      settingManifestUrl.value = convertManifestMirrorUrl(settingManifestUrl.value, "gitlab");
     }
 
     const savedJavaPath = localStorage.getItem("astral_java_path");

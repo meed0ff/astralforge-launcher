@@ -1,0 +1,107 @@
+stages:
+  - build
+  - release
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+build-linux:
+  stage: build
+  image: ubuntu:22.04
+  variables:
+    DEBIAN_FRONTEND: "noninteractive"
+    NO_STRIP: "true"
+  script:
+    - apt-get update
+    - apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf ca-certificates gnupg
+    - mkdir -p /etc/apt/keyrings
+    - curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    - echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
+    - apt-get update && apt-get install -y nodejs
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --bundles appimage
+    - cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --bundles appimage
+    - mkdir -p "$CI_PROJECT_DIR/release-linux"
+    - LAUNCHER_AI=$(find "$CI_PROJECT_DIR/launcher/src-tauri/target/release/bundle/appimage" -maxdepth 1 -name "*.AppImage" | head -n 1)
+    - MANAGER_AI=$(find "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/bundle/appimage" -maxdepth 1 -name "*.AppImage" | head -n 1)
+    - cp "$LAUNCHER_AI" "$CI_PROJECT_DIR/release-linux/EternumLauncher-linux-x86_64.AppImage"
+    - cp "$MANAGER_AI" "$CI_PROJECT_DIR/release-linux/EternumModpackManager-linux-x86_64.AppImage"
+    - chmod +x "$CI_PROJECT_DIR/release-linux/"*.AppImage
+  artifacts:
+    name: "linux-portable-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - release-linux/*
+    expire_in: 1 week
+
+build-fedora:
+  stage: build
+  image: fedora:41
+  script:
+    - dnf install -y webkit2gtk4.1-devel openssl-devel curl wget file tar gzip git gcc gcc-c++ pkgconf-pkg-config libappindicator-gtk3-devel librsvg2-devel nodejs npm
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --no-bundle
+    - cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --no-bundle
+    - mkdir -p "$CI_PROJECT_DIR/release-fedora"
+    - cp "$CI_PROJECT_DIR/launcher/src-tauri/target/release/eternum-launcher" "$CI_PROJECT_DIR/release-fedora/EternumLauncher-fedora-x86_64"
+    - cp "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/eternum-manifest-studio" "$CI_PROJECT_DIR/release-fedora/EternumModpackManager-fedora-x86_64"
+    - chmod +x "$CI_PROJECT_DIR/release-fedora/"*
+  artifacts:
+    name: "fedora-portable-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - release-fedora/*
+    expire_in: 1 week
+
+build-windows:
+  stage: build
+  tags:
+    - saas-windows-medium-amd64
+  when: manual
+  allow_failure: true
+  script:
+    - cd "$CI_PROJECT_DIR\launcher"
+    - npm ci
+    - npx tauri build --no-bundle
+    - cd "$CI_PROJECT_DIR\manifest-gen-gui"
+    - npm ci
+    - npx tauri build --no-bundle
+    - New-Item -ItemType Directory -Path "$CI_PROJECT_DIR\release-win" -Force | Out-Null
+    - Copy-Item "$CI_PROJECT_DIR\launcher\src-tauri\target\release\eternum-launcher.exe" "$CI_PROJECT_DIR\release-win\EternumLauncher-win64.exe" -Force
+    - Copy-Item "$CI_PROJECT_DIR\manifest-gen-gui\src-tauri\target\release\eternum-manifest-studio.exe" "$CI_PROJECT_DIR\release-win\EternumModpackManager-win64.exe" -Force
+  artifacts:
+    name: "windows-portable-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - release-win/*
+    expire_in: 1 week
+
+publish-release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/'
+  needs:
+    - job: build-linux
+      artifacts: true
+    - job: build-fedora
+      artifacts: true
+  script:
+    - apk add --no-cache curl
+    - PKG_BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/eternum/${CI_COMMIT_TAG}"
+    - |
+      for f in release-linux/* release-fedora/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        curl --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$f" "${PKG_BASE}/${name}"
+      done
+    - |
+      release-cli create \
+        --name "Eternum Launcher & Modpack Manager (${CI_COMMIT_TAG})" \
+        --tag-name "${CI_COMMIT_TAG}" \
+        --description "Портативные сборки Eternum Launcher и Eternum Modpack Manager (Linux AppImage + Fedora ELF). Полный комплект с Windows .exe также синхронизируется из GitHub Releases." \
+        --assets-link "{\"name\":\"EternumLauncher-fedora-x86_64\",\"url\":\"${PKG_BASE}/EternumLauncher-fedora-x86_64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"EternumModpackManager-fedora-x86_64\",\"url\":\"${PKG_BASE}/EternumModpackManager-fedora-x86_64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"EternumLauncher-linux-x86_64.AppImage\",\"url\":\"${PKG_BASE}/EternumLauncher-linux-x86_64.AppImage\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"EternumModpackManager-linux-x86_64.AppImage\",\"url\":\"${PKG_BASE}/EternumModpackManager-linux-x86_64.AppImage\",\"link_type\":\"package\"}"

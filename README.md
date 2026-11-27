@@ -10,7 +10,11 @@
 
 ## 📦 Готовые портативные сборки (Releases)
 
-Готовые портативные программы для **Windows** и **Linux** (без установщиков) собираются через GitHub Actions и доступны во вкладке **[Releases](../../releases)**:
+Готовые портативные программы для **Windows** и **Linux** (без установщиков) собираются автоматически через CI/CD и доступны в обоих зеркалах:
+* **GitHub:** [`meed0ff/eternum-launcher`](https://github.com/meed0ff/eternum-launcher/releases)
+* **GitLab (зеркало):** [`meed0ff/eternum-launcher`](https://gitlab.com/meed0ff/eternum-launcher/-/releases)
+
+Файлы в релизах:
 * **Для игроков:**
   * Windows: `EternumLauncher-win64.exe`
   * Fedora (нативный бинарник): `EternumLauncher-fedora-x86_64` (`chmod +x EternumLauncher-fedora-x86_64 && ./EternumLauncher-fedora-x86_64`)
@@ -26,9 +30,11 @@
 
 ## 💎 Как устроена работа со сборкой
 
-* **Никаких сторонних серверов и платного хостинга:**
+* **Никаких сторонних серверов и платного хостинга (+ зеркало GitLab):**
   * Моды, которые есть на **Modrinth**, лаунчер скачивает напрямую с **`cdn.modrinth.com`** на максимальной скорости (они не занимают место в Git-репозитории).
-  * Кастомные моды (отсутствующие на Modrinth), конфиги (`config/`, `defaultconfigs/`), ресурспаки (`resourcepacks/`), шейдеры (`shaderpacks/`), скрипты (`kubejs/`, `datapacks/`), `options.txt`, `servers.dat`, ZIP-бандлы (`bundles/*.zip`) и сам `manifest.json` раздаются через **GitHub Raw**.
+  * Кастомные моды (отсутствующие на Modrinth), конфиги (`config/`, `defaultconfigs/`), ресурспаки (`resourcepacks/`), шейдеры (`shaderpacks/`), скрипты (`kubejs/`, `datapacks/`), `options.txt`, `servers.dat`, ZIP-бандлы (`bundles/*.zip`) и сам `manifest.json` раздаются через **GitHub Raw** или **GitLab Raw** (`https://gitlab.com/meed0ff/eternum-modpack/-/raw/main/...`).
+  * В настройках лаунчера (`⚙`) можно выбрать основное зеркало (**GitHub** или **GitLab**). При сбое выбранного источника лаунчер автоматически переключается на резервное зеркало.
+  * Оба репозитория (`eternum-launcher` и `eternum-modpack`) асинхронно зеркалируются с GitHub на GitLab через GitHub Actions (`.github/workflows/mirror-gitlab.yml`).
   * Ванильный клиент, библиотеки и ассеты берутся с серверов **Mojang**, модлоадеры — с **Fabric Meta/Maven** и **NeoForged Maven**, Java — с **Adoptium** (`api.adoptium.net`).
 * **Авторизация и скины:**
   * **Ely.by OAuth2** + автоматическая загрузка `authlib-injector.jar` (`https://authlib-injector.yushi.moe/artifact/latest.json` с резервами BMCLAPI и GitHub Releases) и подключение к `https://authserver.ely.by`.
@@ -43,11 +49,16 @@
 
 ### Вариант 1: Без пересборки (прямо в интерфейсе лаунчера)
 1. Откройте лаунчер и нажмите **⚙ (Настройки)** в правом верхнем углу.
-2. В поле **«URL манифеста (GitHub raw)»** вставьте ссылку на ваш `manifest.json`:
+2. Выберите **Источник скачивания (зеркало)**: **GitHub** (основной) или **GitLab (зеркало)** — ссылка переключится автоматически, а при проблемах с сетью сработает резервный откат на второе зеркало.
+3. При необходимости в поле **«URL манифеста»** вставьте ссылку на ваш `manifest.json`:
    ```text
    https://raw.githubusercontent.com/<ВАШ_ЛОГИН>/<ВАШ_РЕПОЗИТОРИЙ>/main/manifest.json
    ```
-3. Нажмите **«Сохранить»** — лаунчер сразу обновит название сервера, IP для пинга и подключения, версию игры, модлоадер и список модов из вашего манифеста.
+   или для GitLab:
+   ```text
+   https://gitlab.com/<ВАШ_ЛОГИН>/<ВАШ_РЕПОЗИТОРИЙ>/-/raw/main/manifest.json
+   ```
+4. Нажмите **«Сохранить»** — лаунчер сразу обновит название сервера, IP для пинга и подключения, версию игры, модлоадер и список модов из вашего манифеста.
 
 ### Вариант 2: В исходном коде (если делаете свой брендированный лаунчер)
 

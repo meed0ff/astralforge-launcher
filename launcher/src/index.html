@@ -159,7 +159,14 @@
           </div>
         </div>
         <div class="form-group">
-          <label>URL манифеста (GitHub raw):</label>
+          <label>Источник скачивания (зеркало):</label>
+          <div class="mirror-tabs" id="mirror-tabs">
+            <button type="button" class="mirror-btn active" data-mirror="github">GitHub</button>
+            <button type="button" class="mirror-btn" data-mirror="gitlab">GitLab (зеркало)</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>URL манифеста (raw):</label>
           <input type="text" id="setting-manifest-url" value="https://raw.githubusercontent.com/meed0ff/eternum-modpack/main/manifest.json" />
         </div>
         <div class="form-group">
