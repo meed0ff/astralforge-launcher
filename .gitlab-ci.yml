@@ -98,10 +98,14 @@ publish-release:
         curl --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$f" "${PKG_BASE}/${name}"
       done
     - |
+      if curl -sf --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${CI_COMMIT_TAG}" >/dev/null; then
+        echo "Release ${CI_COMMIT_TAG} already exists on GitLab (synced with full Windows/Linux/Fedora assets)."
+        exit 0
+      fi
       release-cli create \
         --name "Eternum Launcher & Modpack Manager (${CI_COMMIT_TAG})" \
         --tag-name "${CI_COMMIT_TAG}" \
-        --description "Портативные сборки Eternum Launcher и Eternum Modpack Manager (Linux AppImage + Fedora ELF). Полный комплект с Windows .exe также синхронизируется из GitHub Releases." \
+        --description "Портативные сборки Eternum Launcher и Eternum Modpack Manager (${CI_COMMIT_TAG}) (Linux AppImage + Fedora ELF)." \
         --assets-link "{\"name\":\"EternumLauncher-fedora-x86_64\",\"url\":\"${PKG_BASE}/EternumLauncher-fedora-x86_64\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"EternumModpackManager-fedora-x86_64\",\"url\":\"${PKG_BASE}/EternumModpackManager-fedora-x86_64\",\"link_type\":\"package\"}" \
         --assets-link "{\"name\":\"EternumLauncher-linux-x86_64.AppImage\",\"url\":\"${PKG_BASE}/EternumLauncher-linux-x86_64.AppImage\",\"link_type\":\"package\"}" \

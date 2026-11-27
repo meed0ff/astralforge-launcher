@@ -25,14 +25,14 @@
           <span class="pill" id="badge-mods">Модов: —</span>
           <span class="pill" id="badge-extra">Доп. файлов: —</span>
           <span class="pill" id="badge-bundles">Бандлов: —</span>
-          <span class="pill sync-pill" id="badge-sync">GitHub: проверка...</span>
+          <span class="pill sync-pill" id="badge-sync">Сервер: проверка...</span>
         </div>
       </div>
       <div class="folder-row">
         <input type="text" id="modpack-dir" placeholder="Путь к папке сборки (где лежат mods/ и repo_config.json)" />
         <button type="button" id="btn-browse" class="btn-secondary">📂 Обзор...</button>
         <button type="button" id="btn-refresh" class="btn-secondary icon-only" title="Пересканировать папку и проверить обновления">🔄</button>
-        <button type="button" id="btn-download-repo" class="btn-secondary btn-download-repo" title="Скачать сборку с GitHub в выбранную папку">⬇ Скачать из репы</button>
+        <button type="button" id="btn-download-repo" class="btn-secondary btn-download-repo" title="Скачать сборку с выбранного хостинга в папку">⬇ Скачать из репы</button>
       </div>
       <div class="hint-text" id="config-status">Определение папки...</div>
       <div class="storage-meta-row" id="storage-meta-row">
@@ -42,10 +42,10 @@
       </div>
     </section>
 
-    <!-- Блокирующий баннер при наличии обновления на GitHub -->
+    <!-- Блокирующий баннер при наличии обновления -->
     <section class="update-lock-banner hidden" id="update-lock-banner">
       <div class="update-lock-header">
-        <span class="update-lock-title">🔒 На GitHub вышло обновление сборки — требуется скачивание</span>
+        <span class="update-lock-title" id="update-lock-title">🔒 На сервере вышло обновление сборки — требуется скачивание</span>
         <span class="pill warn-pill" id="update-commit-badge">Новый коммит</span>
       </div>
       <p class="update-lock-desc" id="update-lock-desc">
@@ -128,10 +128,16 @@
         </div>
       </div>
 
-      <!-- GitHub и публикация -->
+      <!-- GitHub / GitLab и публикация -->
       <div class="github-box">
         <div class="github-header">
-          <span class="field-label" style="margin-bottom:0;">3. Доступ для загрузки на GitHub (токен сохраняется только на этом ПК)</span>
+          <div class="provider-header-left">
+            <span class="field-label" style="margin-bottom:0;">3. Платформа и доступ для загрузки (токены сохраняются локально)</span>
+            <div class="provider-tabs" id="provider-tabs">
+              <button type="button" class="provider-btn active" data-provider="github">GitHub</button>
+              <button type="button" class="provider-btn" data-provider="gitlab">GitLab</button>
+            </div>
+          </div>
           <button type="button" id="btn-toggle-guide" class="link-btn">Как выдать доступ подруге?</button>
         </div>
         <div class="token-row">
@@ -139,19 +145,19 @@
           <button type="button" id="btn-toggle-token" class="btn-secondary icon-only" title="Показать/скрыть токен">👁</button>
           <button type="button" id="btn-check-github" class="btn-secondary">🔍 Проверить доступ</button>
         </div>
-        <div class="hint-text" id="github-status">Для публикации на сервер укажите токен (Collaborator или токен только для этого репозитория).</div>
+        <div class="hint-text" id="github-status">Для публикации на сервер укажите токен (Collaborator/Developer или токен только для этого репозитория).</div>
 
         <div class="guide-box hidden" id="github-guide">
           <b>Как выдать доступ только нужным людям (например, подруге):</b>
           <ol>
-            <li>На GitHub откройте <code>meed0ff/eternum-modpack</code> → <b>Settings → Collaborators → Add people</b> и добавьте её аккаунт с правами <b>Write</b>.</li>
-            <li>Она создаёт у себя <b>Fine-grained token</b> (<code>github.com/settings/tokens?type=beta</code>) с доступом <b>Only select repositories → eternum-modpack</b> и правом <b>Contents: Read and write</b> (или вы создаёте такой токен только для этого репозитория и передаёте ей).</li>
-            <li>Она вставляет токен в поле выше — программа запоминает его локально и больше не спрашивает.</li>
+            <li><b>GitHub:</b> откройте <code>meed0ff/eternum-modpack</code> → <b>Settings → Collaborators → Add people</b> (права <b>Write</b>). Помощник создаёт <b>Fine-grained token</b> (<code>github.com/settings/tokens?type=beta</code>) для <code>eternum-modpack</code> с правом <b>Contents: Read and write</b>.</li>
+            <li><b>GitLab:</b> откройте проект → <b>Manage → Members → Invite members</b> (роль <b>Developer</b>) и создайте токен (<b>Personal/Project Access Token</b>) со скопами <code>api</code> или <code>read_repository</code> + <code>write_repository</code>.</li>
+            <li>Вставьте токен в поле выше — программа запоминает его отдельно для GitHub и GitLab локально на этом ПК.</li>
           </ol>
         </div>
 
         <details class="advanced-details">
-          <summary>Параметры GitHub-репозитория (владелец, имя, ветка)</summary>
+          <summary>Параметры репозитория (владелец, имя, ветка)</summary>
           <div class="three-cols details-body">
             <div class="field-block">
               <label class="field-label" for="repo-owner">Владелец (owner)</label>

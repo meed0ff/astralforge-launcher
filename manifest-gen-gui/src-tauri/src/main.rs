@@ -154,8 +154,29 @@ pub struct PublishSummary {
     pub repo_url: String,
 }
 
+fn default_provider() -> String {
+    "github".into()
+}
+
+fn normalize_provider(provider: Option<&str>) -> &'static str {
+    match provider.map(|s| s.trim()) {
+        Some(p) if p.eq_ignore_ascii_case("gitlab") => "gitlab",
+        _ => "github",
+    }
+}
+
+fn provider_label(provider: &str) -> &'static str {
+    if provider.eq_ignore_ascii_case("gitlab") {
+        "GitLab"
+    } else {
+        "GitHub"
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncState {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub repo_owner: String,
     pub repo_name: String,
     pub branch: String,
@@ -1199,13 +1220,17 @@ async fn generate_manifest(
     })
 }
 
-fn github_token_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("EternumManifestGen").join("github_token.txt"))
+fn token_file_path(provider: &str) -> Option<PathBuf> {
+    let filename = if provider.eq_ignore_ascii_case("gitlab") {
+        "gitlab_token.txt"
+    } else {
+        "github_token.txt"
+    };
+    dirs::config_dir().map(|d| d.join("EternumManifestGen").join(filename))
 }
 
-#[tauri::command]
-fn load_github_token() -> String {
-    let Some(path) = github_token_path() else {
+fn load_token_for(provider: &str) -> String {
+    let Some(path) = token_file_path(provider) else {
         return String::new();
     };
     fs::read_to_string(path)
@@ -1213,9 +1238,8 @@ fn load_github_token() -> String {
         .unwrap_or_default()
 }
 
-#[tauri::command]
-fn save_github_token(token: String) -> Result<(), String> {
-    let Some(path) = github_token_path() else {
+fn save_token_for(provider: &str, token: &str) -> Result<(), String> {
+    let Some(path) = token_file_path(provider) else {
         return Err("Не удалось определить папку настроек пользователя.".into());
     };
     let trimmed = token.trim();
@@ -1229,6 +1253,26 @@ fn save_github_token(token: String) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::write(&path, trimmed).map_err(|e| format!("Не удалось сохранить токен: {}", e))
+}
+
+#[tauri::command]
+fn load_github_token() -> String {
+    load_token_for("github")
+}
+
+#[tauri::command]
+fn save_github_token(token: String) -> Result<(), String> {
+    save_token_for("github", &token)
+}
+
+#[tauri::command]
+fn load_gitlab_token() -> String {
+    load_token_for("gitlab")
+}
+
+#[tauri::command]
+fn save_gitlab_token(token: String) -> Result<(), String> {
+    save_token_for("gitlab", &token)
 }
 
 fn github_client_optional(token: &str) -> Result<reqwest::Client, String> {
@@ -1254,6 +1298,254 @@ fn github_client_optional(token: &str) -> Result<reqwest::Client, String> {
         .default_headers(headers)
         .build()
         .map_err(|e| e.to_string())
+}
+
+fn gitlab_project_id(owner: &str, repo: &str) -> String {
+    urlencoding::encode(&format!("{}/{}", owner.trim(), repo.trim())).into_owned()
+}
+
+fn gitlab_client_optional(token: &str) -> Result<reqwest::Client, String> {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let mut headers = HeaderMap::new();
+    let trimmed = token.trim();
+    if !trimmed.is_empty() {
+        let auth_val = HeaderValue::from_str(trimmed)
+            .map_err(|_| "Некорректные символы в GitLab токене.".to_string())?;
+        headers.insert("PRIVATE-TOKEN", auth_val);
+    }
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .default_headers(headers)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+fn gitlab_client(token: &str) -> Result<reqwest::Client, String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Err("Введите GitLab токен (Personal/Project Access Token).".into());
+    }
+    gitlab_client_optional(trimmed)
+}
+
+fn map_gitlab_http_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    owner: &str,
+    repo: &str,
+) -> String {
+    match status.as_u16() {
+        401 => "Неверный или истёкший GitLab токен (401 Unauthorized).".into(),
+        403 => format!(
+            "Нет прав на запись в GitLab {}/{} (403 Forbidden). Проверьте роль (Developer/Maintainer) и скопы токена (api или read_repository + write_repository).",
+            owner, repo
+        ),
+        404 => format!(
+            "Проект GitLab {}/{} или ветка не найдены, либо у токена нет к нему доступа (404).",
+            owner, repo
+        ),
+        _ => format!("Ошибка GitLab API ({}): {}", status, body),
+    }
+}
+
+async fn fetch_gitlab_head_info(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<RemoteHeadInfo, String> {
+    let pid = gitlab_project_id(owner, repo);
+    let url = format!(
+        "https://gitlab.com/api/v4/projects/{}/repository/commits/{}",
+        pid,
+        urlencoding::encode(branch.trim())
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка соединения с GitLab: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(map_gitlab_http_error(status, &body, owner, repo));
+    }
+
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let commit_sha = json["id"]
+        .as_str()
+        .ok_or_else(|| "GitLab не вернул SHA последнего коммита.".to_string())?
+        .to_string();
+    let message = json["title"]
+        .as_str()
+        .or_else(|| json["message"].as_str())
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let author = json["author_name"].as_str().unwrap_or("").to_string();
+    let date = json["committed_date"]
+        .as_str()
+        .or_else(|| json["authored_date"].as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(RemoteHeadInfo {
+        commit_sha: commit_sha.clone(),
+        tree_sha: commit_sha,
+        message,
+        author,
+        date,
+    })
+}
+
+async fn fetch_gitlab_tree_items(
+    client: &reqwest::Client,
+    owner: &str,
+    repo: &str,
+    ref_sha: &str,
+) -> Result<Vec<(String, String, String)>, String> {
+    let pid = gitlab_project_id(owner, repo);
+    let mut out = Vec::new();
+    let mut page = 1u32;
+
+    loop {
+        let url = format!(
+            "https://gitlab.com/api/v4/projects/{}/repository/tree?ref={}&recursive=true&per_page=100&page={}",
+            pid,
+            urlencoding::encode(ref_sha),
+            page
+        );
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Ошибка получения дерева файлов GitLab: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_gitlab_http_error(status, &body, owner, repo));
+        }
+
+        let next_page = resp
+            .headers()
+            .get("x-next-page")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        let items: Vec<Value> = resp.json().await.map_err(|e| e.to_string())?;
+        if items.is_empty() {
+            break;
+        }
+        for item in items {
+            if item["type"].as_str() != Some("blob") {
+                continue;
+            }
+            let Some(path) = item["path"].as_str() else {
+                continue;
+            };
+            let Some(sha) = item["id"].as_str() else {
+                continue;
+            };
+            let mode = item["mode"].as_str().unwrap_or("100644");
+            out.push((path.to_string(), sha.to_string(), mode.to_string()));
+        }
+
+        if next_page.is_empty() {
+            break;
+        }
+        page = next_page.parse::<u32>().unwrap_or(page + 1);
+    }
+
+    Ok(out)
+}
+
+fn make_gitlab_raw_api_url(owner: &str, repo: &str, ref_sha: &str, rel_path: &str) -> String {
+    let pid = gitlab_project_id(owner, repo);
+    let encoded_path = urlencoding::encode(rel_path);
+    format!(
+        "https://gitlab.com/api/v4/projects/{}/repository/files/{}/raw?ref={}",
+        pid,
+        encoded_path,
+        urlencoding::encode(ref_sha)
+    )
+}
+
+async fn estimate_gitlab_pack_sizes(
+    client: &reqwest::Client,
+    base_dir: &Path,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+    tree_items: &[(String, String, String)],
+) -> Option<(u64, u64)> {
+    let has_manifest = tree_items.iter().any(|(p, _, _)| p == MANIFEST_FILE);
+    if !has_manifest {
+        return None;
+    }
+
+    let manifest_url = make_gitlab_raw_api_url(owner, repo, commit_sha, MANIFEST_FILE);
+    let resp = client.get(&manifest_url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let manifest_val = resp.json::<Value>().await.ok()?;
+    let files = manifest_val["files"].as_array()?;
+
+    let mut remote_sha_map: HashMap<&str, &str> = HashMap::new();
+    for (p, sha, _) in tree_items {
+        remote_sha_map.insert(p.as_str(), sha.as_str());
+    }
+
+    let mut total_pack_bytes: u64 = 0;
+    let mut needed_bytes: u64 = 0;
+
+    for entry in files {
+        let Some(rel_path) = entry["path"].as_str() else {
+            continue;
+        };
+        let size = entry["size"].as_u64().unwrap_or(0);
+        total_pack_bytes = total_pack_bytes.saturating_add(size);
+
+        let local_path = base_dir.join(rel_path);
+        let is_cached = if entry["source"].as_str() == Some("modrinth") {
+            let expected_sha256 = entry["sha256"].as_str().unwrap_or("");
+            if local_path.is_file() && !expected_sha256.is_empty() {
+                if fs::metadata(&local_path).map(|m| m.len()).unwrap_or(u64::MAX) == size {
+                    compute_hashes(&local_path)
+                        .map(|(sha256, _, _)| sha256.eq_ignore_ascii_case(expected_sha256))
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else if let Some(remote_sha) = remote_sha_map.get(rel_path) {
+            if local_path.is_file() {
+                if fs::metadata(&local_path).map(|m| m.len()).unwrap_or(u64::MAX) == size {
+                    fs::read(&local_path)
+                        .map(|bytes| &compute_git_blob_sha1(&bytes) == remote_sha)
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !is_cached {
+            needed_bytes = needed_bytes.saturating_add(size);
+        }
+    }
+
+    Some((total_pack_bytes, needed_bytes))
 }
 
 fn read_sync_state(base_dir: &Path) -> Option<SyncState> {
@@ -1473,7 +1765,10 @@ async fn check_remote_sync(
     repo: String,
     branch: String,
     token: String,
+    provider: Option<String>,
 ) -> Result<SyncCheckResult, String> {
+    let prov = normalize_provider(provider.as_deref());
+    let label = provider_label(prov);
     let base_dir = PathBuf::from(dir.trim());
     let free_disk_bytes = get_available_disk_space(&base_dir);
     let owner = owner.trim();
@@ -1487,7 +1782,7 @@ async fn check_remote_sync(
             remote_message: None,
             remote_author: None,
             remote_date: None,
-            message: "Укажите владельца, репозиторий и ветку GitHub.".into(),
+            message: format!("Укажите владельца, репозиторий и ветку {}.", label),
             total_pack_bytes: compute_local_manifest_total_size(&base_dir),
             needed_bytes: None,
             free_disk_bytes,
@@ -1495,8 +1790,16 @@ async fn check_remote_sync(
         });
     }
 
-    let client = github_client_optional(&token)?;
-    let head = match fetch_remote_head_info(&client, owner, repo, branch).await {
+    let client = if prov == "gitlab" {
+        gitlab_client_optional(&token)?
+    } else {
+        github_client_optional(&token)?
+    };
+    let head = match if prov == "gitlab" {
+        fetch_gitlab_head_info(&client, owner, repo, branch).await
+    } else {
+        fetch_remote_head_info(&client, owner, repo, branch).await
+    } {
         Ok(h) => h,
         Err(err) => {
             return Ok(SyncCheckResult {
@@ -1516,7 +1819,8 @@ async fn check_remote_sync(
     };
 
     if let Some(local_state) = read_sync_state(&base_dir) {
-        let same_target = local_state.repo_owner.eq_ignore_ascii_case(owner)
+        let same_target = local_state.provider.eq_ignore_ascii_case(prov)
+            && local_state.repo_owner.eq_ignore_ascii_case(owner)
             && local_state.repo_name.eq_ignore_ascii_case(repo)
             && local_state.branch == branch;
 
@@ -1528,7 +1832,7 @@ async fn check_remote_sync(
                 remote_message: Some(head.message),
                 remote_author: Some(head.author),
                 remote_date: Some(head.date),
-                message: "Сборка актуальна и синхронизирована с GitHub.".into(),
+                message: format!("Сборка актуальна и синхронизирована с {}.", label),
                 total_pack_bytes: compute_local_manifest_total_size(&base_dir),
                 needed_bytes: Some(0),
                 free_disk_bytes,
@@ -1536,57 +1840,96 @@ async fn check_remote_sync(
             });
         }
 
-        let sizes = estimate_remote_pack_sizes(
-            &client,
-            &base_dir,
-            owner,
-            repo,
-            &head.commit_sha,
-            &head.tree_sha,
-            None,
-        )
-        .await;
-        let total_pack_bytes = sizes.map(|(t, _)| t);
-        let needed_bytes = sizes.map(|(_, n)| n);
-        let enough_disk_space = match (free_disk_bytes, needed_bytes) {
-            (Some(free), Some(need)) => Some(free >= need),
-            _ => None,
-        };
+        if same_target {
+            let sizes = if prov == "gitlab" {
+                match fetch_gitlab_tree_items(&client, owner, repo, &head.commit_sha).await {
+                    Ok(items) => {
+                        estimate_gitlab_pack_sizes(
+                            &client,
+                            &base_dir,
+                            owner,
+                            repo,
+                            &head.commit_sha,
+                            &items,
+                        )
+                        .await
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                estimate_remote_pack_sizes(
+                    &client,
+                    &base_dir,
+                    owner,
+                    repo,
+                    &head.commit_sha,
+                    &head.tree_sha,
+                    None,
+                )
+                .await
+            };
+            let total_pack_bytes = sizes.map(|(t, _)| t);
+            let needed_bytes = sizes.map(|(_, n)| n);
+            let enough_disk_space = match (free_disk_bytes, needed_bytes) {
+                (Some(free), Some(need)) => Some(free >= need),
+                _ => None,
+            };
 
-        return Ok(SyncCheckResult {
-            status: "update_required".into(),
-            local_sha: Some(local_state.commit_sha),
-            remote_sha: Some(head.commit_sha),
-            remote_message: Some(head.message),
-            remote_author: Some(head.author),
-            remote_date: Some(head.date),
-            message: "На GitHub обнаружено обновление сборки! Скачайте его перед продолжением работы.".into(),
-            total_pack_bytes,
-            needed_bytes,
-            free_disk_bytes,
-            enough_disk_space,
-        });
+            return Ok(SyncCheckResult {
+                status: "update_required".into(),
+                local_sha: Some(local_state.commit_sha),
+                remote_sha: Some(head.commit_sha),
+                remote_message: Some(head.message),
+                remote_author: Some(head.author),
+                remote_date: Some(head.date),
+                message: format!(
+                    "На {} обнаружено обновление сборки! Скачайте его перед продолжением работы.",
+                    label
+                ),
+                total_pack_bytes,
+                needed_bytes,
+                free_disk_bytes,
+                enough_disk_space,
+            });
+        }
     }
 
-    // Если .eternum-sync.json ещё нет (например, папка перенесена или новая),
-    // проверяем, есть ли уже manifest.json в удалённом репозитории.
-    let tree_url = format!(
-        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-        owner, repo, head.tree_sha
-    );
-    let tree_resp = client.get(&tree_url).send().await;
-    let tree_json_opt: Option<Value> = match tree_resp {
-        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
-        _ => None,
+    // Если .eternum-sync.json ещё нет или сменилась платформа, проверяем manifest.json в удалённом дереве.
+    let (tree_json_opt, gitlab_tree_opt) = if prov == "gitlab" {
+        let items = fetch_gitlab_tree_items(&client, owner, repo, &head.commit_sha)
+            .await
+            .ok();
+        (None, items)
+    } else {
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+            owner, repo, head.tree_sha
+        );
+        let tree_resp = client.get(&tree_url).send().await;
+        let tree_json_opt: Option<Value> = match tree_resp {
+            Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+            _ => None,
+        };
+        (tree_json_opt, None)
     };
-    let remote_manifest_sha = tree_json_opt.as_ref().and_then(|tree_json| {
-        tree_json["tree"].as_array().and_then(|arr| {
-            arr.iter()
-                .find(|item| item["path"].as_str() == Some(MANIFEST_FILE))
-                .and_then(|item| item["sha"].as_str())
-                .map(|s| s.to_string())
+
+    let remote_manifest_sha = if prov == "gitlab" {
+        gitlab_tree_opt.as_ref().and_then(|items| {
+            items
+                .iter()
+                .find(|(p, _, _)| p == MANIFEST_FILE)
+                .map(|(_, sha, _)| sha.clone())
         })
-    });
+    } else {
+        tree_json_opt.as_ref().and_then(|tree_json| {
+            tree_json["tree"].as_array().and_then(|arr| {
+                arr.iter()
+                    .find(|item| item["path"].as_str() == Some(MANIFEST_FILE))
+                    .and_then(|item| item["sha"].as_str())
+                    .map(|s| s.to_string())
+            })
+        })
+    };
 
     let Some(remote_m_sha) = remote_manifest_sha else {
         return Ok(SyncCheckResult {
@@ -1596,7 +1939,10 @@ async fn check_remote_sync(
             remote_message: Some(head.message),
             remote_author: Some(head.author),
             remote_date: Some(head.date),
-            message: "Репозиторий пока не содержит manifest.json — можно выполнить первую публикацию.".into(),
+            message: format!(
+                "Репозиторий {} пока не содержит manifest.json — можно выполнить первую публикацию.",
+                label
+            ),
             total_pack_bytes: compute_local_manifest_total_size(&base_dir),
             needed_bytes: Some(0),
             free_disk_bytes,
@@ -1616,6 +1962,7 @@ async fn check_remote_sync(
                 let _ = write_sync_state(
                     &base_dir,
                     &SyncState {
+                        provider: prov.to_string(),
                         repo_owner: owner.to_string(),
                         repo_name: repo.to_string(),
                         branch: branch.to_string(),
@@ -1630,7 +1977,7 @@ async fn check_remote_sync(
                     remote_message: Some(head.message),
                     remote_author: Some(head.author),
                     remote_date: Some(head.date),
-                    message: "Локальная сборка совпадает с версией на GitHub.".into(),
+                    message: format!("Локальная сборка совпадает с версией на {}.", label),
                     total_pack_bytes: compute_local_manifest_total_size(&base_dir),
                     needed_bytes: Some(0),
                     free_disk_bytes,
@@ -1640,16 +1987,26 @@ async fn check_remote_sync(
         }
     }
 
-    let sizes = estimate_remote_pack_sizes(
-        &client,
-        &base_dir,
-        owner,
-        repo,
-        &head.commit_sha,
-        &head.tree_sha,
-        tree_json_opt.as_ref(),
-    )
-    .await;
+    let sizes = if prov == "gitlab" {
+        match gitlab_tree_opt.as_ref() {
+            Some(items) => {
+                estimate_gitlab_pack_sizes(&client, &base_dir, owner, repo, &head.commit_sha, items)
+                    .await
+            }
+            None => None,
+        }
+    } else {
+        estimate_remote_pack_sizes(
+            &client,
+            &base_dir,
+            owner,
+            repo,
+            &head.commit_sha,
+            &head.tree_sha,
+            tree_json_opt.as_ref(),
+        )
+        .await
+    };
     let total_pack_bytes = sizes.map(|(t, _)| t);
     let needed_bytes = sizes.map(|(_, n)| n);
     let enough_disk_space = match (free_disk_bytes, needed_bytes) {
@@ -1664,7 +2021,10 @@ async fn check_remote_sync(
         remote_message: Some(head.message),
         remote_author: Some(head.author),
         remote_date: Some(head.date),
-        message: "На GitHub уже есть опубликованная сборка, но локальная папка не синхронизирована. Скачайте обновление перед продолжением.".into(),
+        message: format!(
+            "На {} уже есть опубликованная сборка, но локальная папка не синхронизирована. Скачайте обновление перед продолжением.",
+            label
+        ),
         total_pack_bytes,
         needed_bytes,
         free_disk_bytes,
@@ -1823,19 +2183,26 @@ async fn download_modpack_from_github(
     repo: String,
     branch: String,
     token: String,
+    provider: Option<String>,
 ) -> Result<DownloadSummary, String> {
+    let prov = normalize_provider(provider.as_deref());
+    let label = provider_label(prov);
     let base_dir = PathBuf::from(dir.trim());
     let owner = owner.trim();
     let repo = repo.trim();
     let branch = branch.trim();
     if owner.is_empty() || repo.is_empty() || branch.is_empty() {
-        return Err("Укажите владельца, репозиторий и ветку GitHub.".into());
+        return Err(format!("Укажите владельца, репозиторий и ветку {}.", label));
     }
 
     fs::create_dir_all(&base_dir)
         .map_err(|e| format!("Не удалось создать папку {}: {}", base_dir.display(), e))?;
 
-    let gh_client = github_client_optional(&token)?;
+    let gh_client = if prov == "gitlab" {
+        gitlab_client_optional(&token)?
+    } else {
+        github_client_optional(&token)?
+    };
     let cdn_client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .build()
@@ -1845,43 +2212,60 @@ async fn download_modpack_from_github(
         "gen-progress",
         GenProgress {
             percent: 5,
-            status: format!("Подключение к GitHub ({}/{})...", owner, repo),
-            log: Some(format!("☁ Получение данных сборки из {}/{} ({})", owner, repo, branch)),
+            status: format!("Подключение к {} ({}/{})...", label, owner, repo),
+            log: Some(format!(
+                "☁ Получение данных сборки из {} {}/{} ({})",
+                label, owner, repo, branch
+            )),
         },
     );
 
-    let head = fetch_remote_head_info(&gh_client, owner, repo, branch).await?;
-    let tree_url = format!(
-        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
-        owner, repo, head.tree_sha
-    );
-    let tree_resp = gh_client
-        .get(&tree_url)
-        .send()
-        .await
-        .map_err(|e| format!("Ошибка получения дерева файлов: {}", e))?;
-    if !tree_resp.status().is_success() {
-        let status = tree_resp.status();
-        let body = tree_resp.text().await.unwrap_or_default();
-        return Err(map_github_http_error(status, &body, owner, repo));
-    }
-    let tree_json: Value = tree_resp.json().await.map_err(|e| e.to_string())?;
+    let head = if prov == "gitlab" {
+        fetch_gitlab_head_info(&gh_client, owner, repo, branch).await?
+    } else {
+        fetch_remote_head_info(&gh_client, owner, repo, branch).await?
+    };
 
     let mut github_tree_files: Vec<(String, String, u64)> = Vec::new(); // (rel_path, blob_sha, size)
-    if let Some(items) = tree_json["tree"].as_array() {
-        for item in items {
-            if item["type"].as_str() != Some("blob") {
-                continue;
+    if prov == "gitlab" {
+        let tree_items = fetch_gitlab_tree_items(&gh_client, owner, repo, &head.commit_sha).await?;
+        for (path, sha, _) in tree_items {
+            if is_managed_pack_path(&path) {
+                github_tree_files.push((path, sha, 0));
             }
-            let Some(path) = item["path"].as_str() else {
-                continue;
-            };
-            let Some(sha) = item["sha"].as_str() else {
-                continue;
-            };
-            let size = item["size"].as_u64().unwrap_or(0);
-            if is_managed_pack_path(path) {
-                github_tree_files.push((path.to_string(), sha.to_string(), size));
+        }
+    } else {
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+            owner, repo, head.tree_sha
+        );
+        let tree_resp = gh_client
+            .get(&tree_url)
+            .send()
+            .await
+            .map_err(|e| format!("Ошибка получения дерева файлов: {}", e))?;
+        if !tree_resp.status().is_success() {
+            let status = tree_resp.status();
+            let body = tree_resp.text().await.unwrap_or_default();
+            return Err(map_github_http_error(status, &body, owner, repo));
+        }
+        let tree_json: Value = tree_resp.json().await.map_err(|e| e.to_string())?;
+
+        if let Some(items) = tree_json["tree"].as_array() {
+            for item in items {
+                if item["type"].as_str() != Some("blob") {
+                    continue;
+                }
+                let Some(path) = item["path"].as_str() else {
+                    continue;
+                };
+                let Some(sha) = item["sha"].as_str() else {
+                    continue;
+                };
+                let size = item["size"].as_u64().unwrap_or(0);
+                if is_managed_pack_path(path) {
+                    github_tree_files.push((path.to_string(), sha.to_string(), size));
+                }
             }
         }
     }
@@ -1891,6 +2275,9 @@ async fn download_modpack_from_github(
     }
 
     let make_commit_raw_url = |rel_path: &str| -> String {
+        if prov == "gitlab" {
+            return make_gitlab_raw_api_url(owner, repo, &head.commit_sha, rel_path);
+        }
         let encoded: String = rel_path
             .split('/')
             .map(|seg| urlencoding::encode(seg).into_owned())
@@ -1953,6 +2340,7 @@ async fn download_modpack_from_github(
         }
     }
 
+    let mut manifest_size_map: HashMap<String, u64> = HashMap::new();
     if let Some(manifest_val) = manifest_val_opt {
         if let Some(pv) = manifest_val["packVersion"].as_str() {
             pack_version = pv.to_string();
@@ -1962,15 +2350,25 @@ async fn download_modpack_from_github(
                 let Some(rel_path) = entry["path"].as_str() else {
                     continue;
                 };
+                let size = entry["size"].as_u64().unwrap_or(0);
+                manifest_size_map.insert(rel_path.to_string(), size);
                 expected_paths.insert(rel_path.to_string());
                 if entry["source"].as_str() == Some("modrinth") {
                     if let Some(url) = entry["url"].as_str() {
                         let sha256 = entry["sha256"].as_str().unwrap_or("").to_string();
-                        let size = entry["size"].as_u64().unwrap_or(0);
                         total_pack_bytes = total_pack_bytes.saturating_add(size);
                         modrinth_entries.push((rel_path.to_string(), url.to_string(), sha256, size));
                     }
                 }
+            }
+        }
+    }
+
+    for (rel_path, size) in &mut gh_to_download {
+        if *size == 0 {
+            if let Some(&mapped_size) = manifest_size_map.get(rel_path) {
+                *size = mapped_size;
+                total_pack_bytes = total_pack_bytes.saturating_add(mapped_size);
             }
         }
     }
@@ -2039,8 +2437,8 @@ async fn download_modpack_from_github(
             "gen-progress",
             GenProgress {
                 percent: pct.min(92),
-                status: format!("Скачивание из GitHub ({}/{}): {}", idx + 1, total_gh, rel_path),
-                log: Some(format!("⬇ GitHub: {} ({})", rel_path, format_bytes_ru(*known_size))),
+                status: format!("Скачивание из {} ({}/{}): {}", label, idx + 1, total_gh, rel_path),
+                log: Some(format!("⬇ {}: {} ({})", label, rel_path, format_bytes_ru(*known_size))),
             },
         );
 
@@ -2138,6 +2536,7 @@ async fn download_modpack_from_github(
     write_sync_state(
         &base_dir,
         &SyncState {
+            provider: prov.to_string(),
             repo_owner: owner.to_string(),
             repo_name: repo.to_string(),
             branch: branch.to_string(),
@@ -2150,10 +2549,11 @@ async fn download_modpack_from_github(
         "gen-progress",
         GenProgress {
             percent: 100,
-            status: "Сборка успешно синхронизирована с GitHub!".into(),
+            status: format!("Сборка успешно синхронизирована с {}!", label),
             log: Some(format!(
-                "✅ Готово! Коммит {}: скачано с GitHub {}, с Modrinth {}, из кэша {}, удалено устаревших {}",
+                "✅ Готово! Коммит {}: скачано с {} {}, с Modrinth {}, из кэша {}, удалено устаревших {}",
                 &head.commit_sha[..7.min(head.commit_sha.len())],
+                label,
                 downloaded_github,
                 downloaded_modrinth,
                 skipped_cached,
@@ -2215,13 +2615,61 @@ async fn check_github_access(
     owner: String,
     repo: String,
     token: String,
+    provider: Option<String>,
 ) -> Result<GithubAccessInfo, String> {
+    let prov = normalize_provider(provider.as_deref());
+    let label = provider_label(prov);
     let trimmed_token = token.trim();
     if trimmed_token.is_empty() {
-        return Err("Введите GitHub токен (PAT).".into());
+        return Err(format!("Введите {} токен.", label));
     }
     let owner = owner.trim();
     let repo = repo.trim();
+
+    if prov == "gitlab" {
+        let client = gitlab_client(trimmed_token)?;
+        let pid = gitlab_project_id(owner, repo);
+        let repo_url = format!("https://gitlab.com/api/v4/projects/{}", pid);
+        let resp = client
+            .get(&repo_url)
+            .send()
+            .await
+            .map_err(|e| format!("Ошибка соединения с GitLab: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_gitlab_http_error(status, &body, owner, repo));
+        }
+
+        let repo_json: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let proj_level = repo_json["permissions"]["project_access"]["access_level"]
+            .as_u64()
+            .unwrap_or(0);
+        let group_level = repo_json["permissions"]["group_access"]["access_level"]
+            .as_u64()
+            .unwrap_or(0);
+        let can_push = proj_level.max(group_level) >= 30;
+        let private_repo = repo_json["visibility"].as_str() == Some("private");
+
+        let login = match client.get("https://gitlab.com/api/v4/user").send().await {
+            Ok(u_resp) if u_resp.status().is_success() => u_resp
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| v["username"].as_str().map(|s| s.to_string())),
+            _ => None,
+        };
+
+        let _ = save_token_for("gitlab", trimmed_token);
+
+        return Ok(GithubAccessInfo {
+            login,
+            can_push,
+            private_repo,
+        });
+    }
+
     let client = github_client(trimmed_token)?;
 
     let repo_url = format!("https://api.github.com/repos/{}/{}", owner, repo);
@@ -2253,7 +2701,7 @@ async fn check_github_access(
         _ => None,
     };
 
-    let _ = save_github_token(trimmed_token.to_string());
+    let _ = save_token_for("github", trimmed_token);
 
     Ok(GithubAccessInfo {
         login,
@@ -2284,18 +2732,346 @@ fn is_managed_pack_path(path: &str) -> bool {
             .any(|dir| path.starts_with(&format!("{}/", dir)))
 }
 
+async fn publish_to_gitlab_inner(
+    app: &AppHandle,
+    base_dir: &Path,
+    config: &RepoConfig,
+    manifest_val: &Value,
+    token: &str,
+    commit_message: Option<String>,
+) -> Result<PublishSummary, String> {
+    let owner = config.repo_owner.trim();
+    let repo = config.repo_name.trim();
+    let branch = config.branch.trim();
+    let client = gitlab_client(token)?;
+    let pid = gitlab_project_id(owner, repo);
+
+    let mut desired_rel_paths: Vec<String> = vec![
+        MANIFEST_FILE.to_string(),
+        CONFIG_FILE.to_string(),
+    ];
+    if let Some(files) = manifest_val["files"].as_array() {
+        for entry in files {
+            if entry["source"].as_str() == Some("github") {
+                if let Some(rel) = entry["path"].as_str() {
+                    desired_rel_paths.push(rel.to_string());
+                }
+            }
+        }
+    }
+    let desired_set: HashSet<String> = desired_rel_paths.iter().cloned().collect();
+
+    let _ = app.emit(
+        "gen-progress",
+        GenProgress {
+            percent: 15,
+            status: format!("Подключение к GitLab ({}/{})...", owner, repo),
+            log: Some(format!("☁ Синхронизация с GitLab: {}/{} ({})", owner, repo, branch)),
+        },
+    );
+
+    let proj_url = format!("https://gitlab.com/api/v4/projects/{}", pid);
+    let proj_resp = client
+        .get(&proj_url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка соединения с GitLab: {}", e))?;
+    if !proj_resp.status().is_success() {
+        let status = proj_resp.status();
+        let body = proj_resp.text().await.unwrap_or_default();
+        return Err(map_gitlab_http_error(status, &body, owner, repo));
+    }
+
+    let head_commit_url = format!(
+        "https://gitlab.com/api/v4/projects/{}/repository/commits/{}",
+        pid,
+        urlencoding::encode(branch)
+    );
+    let head_resp = client
+        .get(&head_commit_url)
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса ветки {} на GitLab: {}", branch, e))?;
+
+    let head_sha_opt: Option<String> = if head_resp.status().as_u16() == 404 {
+        None
+    } else if head_resp.status().is_success() {
+        let json: Value = head_resp.json().await.map_err(|e| e.to_string())?;
+        json["id"].as_str().map(|s| s.to_string())
+    } else {
+        let status = head_resp.status();
+        let body = head_resp.text().await.unwrap_or_default();
+        return Err(map_gitlab_http_error(status, &body, owner, repo));
+    };
+
+    if let (Some(head_sha), Some(local_sync)) = (head_sha_opt.as_ref(), read_sync_state(base_dir)) {
+        if local_sync.provider.eq_ignore_ascii_case("gitlab")
+            && local_sync.repo_owner.eq_ignore_ascii_case(owner)
+            && local_sync.repo_name.eq_ignore_ascii_case(repo)
+            && local_sync.branch == branch
+            && local_sync.commit_sha != *head_sha
+        {
+            return Err(format!(
+                "На GitLab есть более новый коммит ({}), чем локально ({}). Сначала скачайте обновление!",
+                &head_sha[..7.min(head_sha.len())],
+                &local_sync.commit_sha[..7.min(local_sync.commit_sha.len())]
+            ));
+        }
+    }
+
+    let mut remote_blobs: HashMap<String, String> = HashMap::new();
+    if let Some(ref head_sha) = head_sha_opt {
+        let items = fetch_gitlab_tree_items(&client, owner, repo, head_sha).await?;
+        for (path, sha, _) in items {
+            if is_managed_pack_path(&path) {
+                remote_blobs.insert(path, sha);
+            }
+        }
+    }
+
+    let total_desired = desired_rel_paths.len().max(1);
+    let mut uploaded_count = 0usize;
+    let mut reused_count = 0usize;
+    let mut removed_count = 0usize;
+    let mut content_actions: Vec<(Value, usize)> = Vec::new();
+    let mut final_actions: Vec<Value> = Vec::new();
+
+    for (idx, rel_path) in desired_rel_paths.iter().enumerate() {
+        let local_path = base_dir.join(rel_path);
+        let bytes = fs::read(&local_path)
+            .map_err(|e| format!("Не найден файл для загрузки {}: {}", local_path.display(), e))?;
+
+        if bytes.len() > 95 * 1024 * 1024 {
+            return Err(format!(
+                "Файл {} превышает лимит загрузки (~95 MB).",
+                rel_path
+            ));
+        }
+
+        let local_blob_sha = compute_git_blob_sha1(&bytes);
+        if remote_blobs.get(rel_path) == Some(&local_blob_sha) {
+            reused_count += 1;
+            continue;
+        }
+
+        let pct = 30 + ((idx as f32 / total_desired as f32) * 50.0) as u32;
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: pct,
+                status: format!("Подготовка для GitLab ({}/{}): {}", idx + 1, total_desired, rel_path),
+                log: Some(format!("⬆ Подготовка {}", rel_path)),
+            },
+        );
+
+        let action_type = if remote_blobs.contains_key(rel_path) {
+            "update"
+        } else {
+            "create"
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let b64_len = b64.len();
+        let entry = json!({
+            "action": action_type,
+            "file_path": rel_path,
+            "content": b64,
+            "encoding": "base64"
+        });
+        uploaded_count += 1;
+
+        if rel_path == MANIFEST_FILE || rel_path == CONFIG_FILE {
+            final_actions.push(entry);
+        } else {
+            content_actions.push((entry, b64_len));
+        }
+    }
+
+    for remote_path in remote_blobs.keys() {
+        if !desired_set.contains(remote_path) {
+            final_actions.push(json!({
+                "action": "delete",
+                "file_path": remote_path
+            }));
+            removed_count += 1;
+        }
+    }
+
+    let repo_url = format!("https://gitlab.com/{}/{}", owner, repo);
+    if uploaded_count == 0 && removed_count == 0 {
+        if let Some(head_sha) = head_sha_opt {
+            let _ = write_sync_state(
+                base_dir,
+                &SyncState {
+                    provider: "gitlab".into(),
+                    repo_owner: owner.to_string(),
+                    repo_name: repo.to_string(),
+                    branch: branch.to_string(),
+                    commit_sha: head_sha.clone(),
+                    pack_version: config.pack_version.clone(),
+                },
+            );
+            let _ = app.emit(
+                "gen-progress",
+                GenProgress {
+                    percent: 100,
+                    status: "На GitLab уже актуальная версия!".into(),
+                    log: Some("✓ Изменений для отправки на GitLab нет.".into()),
+                },
+            );
+            return Ok(PublishSummary {
+                commit_sha: head_sha,
+                uploaded_count: 0,
+                reused_count,
+                removed_count: 0,
+                no_changes: true,
+                repo_url,
+            });
+        }
+    }
+
+    let base_msg = commit_message
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "Update modpack {} (MC {} {} {})",
+                config.pack_version, config.minecraft_version, config.loader_type, config.loader_version
+            )
+        });
+
+    // Разбиваем крупные пачки файлов на коммиты до ~15 МБ, а manifest/удаления отправляем финальным коммитом.
+    const MAX_BATCH_B64_BYTES: usize = 15 * 1024 * 1024;
+    let mut batches: Vec<Vec<Value>> = Vec::new();
+    let mut cur_batch: Vec<Value> = Vec::new();
+    let mut cur_bytes: usize = 0;
+
+    for (entry, sz) in content_actions {
+        if !cur_batch.is_empty() && cur_bytes + sz > MAX_BATCH_B64_BYTES {
+            batches.push(cur_batch);
+            cur_batch = Vec::new();
+            cur_bytes = 0;
+        }
+        cur_batch.push(entry);
+        cur_bytes += sz;
+    }
+    if !cur_batch.is_empty() {
+        let final_est: usize = final_actions
+            .iter()
+            .filter_map(|v| v["content"].as_str().map(|s| s.len()))
+            .sum();
+        if cur_bytes + final_est <= MAX_BATCH_B64_BYTES {
+            cur_batch.extend(final_actions);
+            batches.push(cur_batch);
+        } else {
+            batches.push(cur_batch);
+            if !final_actions.is_empty() {
+                batches.push(final_actions);
+            }
+        }
+    } else if !final_actions.is_empty() {
+        batches.push(final_actions);
+    }
+
+    let commits_api_url = format!("https://gitlab.com/api/v4/projects/{}/repository/commits", pid);
+    let total_batches = batches.len().max(1);
+    let mut new_commit_sha = String::new();
+
+    for (b_idx, actions) in batches.into_iter().enumerate() {
+        let pct = 80 + (((b_idx + 1) as f32 / total_batches as f32) * 18.0) as u32;
+        let msg = if total_batches > 1 && b_idx + 1 < total_batches {
+            format!("{} [part {}/{}]", base_msg, b_idx + 1, total_batches)
+        } else {
+            base_msg.clone()
+        };
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: pct.min(98),
+                status: format!("Отправка коммита на GitLab ({}/{})...", b_idx + 1, total_batches),
+                log: Some(format!(
+                    "📤 Отправка пакета {}/{} на GitLab ({} действий)...",
+                    b_idx + 1,
+                    total_batches,
+                    actions.len()
+                )),
+            },
+        );
+
+        let resp = client
+            .post(&commits_api_url)
+            .json(&json!({
+                "branch": branch,
+                "commit_message": msg,
+                "actions": actions
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Ошибка создания коммита на GitLab: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_gitlab_http_error(status, &body, owner, repo));
+        }
+        let created: Value = resp.json().await.map_err(|e| e.to_string())?;
+        new_commit_sha = created["id"]
+            .as_str()
+            .ok_or_else(|| "GitLab не вернул ID созданного коммита.".to_string())?
+            .to_string();
+    }
+
+    let _ = write_sync_state(
+        base_dir,
+        &SyncState {
+            provider: "gitlab".into(),
+            repo_owner: owner.to_string(),
+            repo_name: repo.to_string(),
+            branch: branch.to_string(),
+            commit_sha: new_commit_sha.clone(),
+            pack_version: config.pack_version.clone(),
+        },
+    );
+
+    let _ = app.emit(
+        "gen-progress",
+        GenProgress {
+            percent: 100,
+            status: "Обновление опубликовано на GitLab!".into(),
+            log: Some(format!(
+                "🚀 Опубликовано на GitLab! Коммит {} (загружено: {}, без изменений: {}, удалено: {})",
+                &new_commit_sha[..7.min(new_commit_sha.len())],
+                uploaded_count,
+                reused_count,
+                removed_count
+            )),
+        },
+    );
+
+    Ok(PublishSummary {
+        commit_sha: new_commit_sha,
+        uploaded_count,
+        reused_count,
+        removed_count,
+        no_changes: false,
+        repo_url,
+    })
+}
+
 #[tauri::command]
 async fn publish_to_github(
     app: AppHandle,
     dir: String,
     token: String,
     commit_message: Option<String>,
+    provider: Option<String>,
 ) -> Result<PublishSummary, String> {
+    let prov = normalize_provider(provider.as_deref());
+    let label = provider_label(prov);
     let trimmed_token = token.trim();
     if trimmed_token.is_empty() {
-        return Err("Укажите GitHub токен для загрузки обновления на сервер.".into());
+        return Err(format!("Укажите {} токен для загрузки обновления на сервер.", label));
     }
-    save_github_token(trimmed_token.to_string())?;
+    save_token_for(prov, trimmed_token)?;
 
     let base_dir = PathBuf::from(dir.trim());
     let config_path = base_dir.join(CONFIG_FILE);
@@ -2314,6 +3090,18 @@ async fn publish_to_github(
         &fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?,
     )
     .map_err(|e| format!("Ошибка чтения manifest.json: {}", e))?;
+
+    if prov == "gitlab" {
+        return publish_to_gitlab_inner(
+            &app,
+            &base_dir,
+            &config,
+            &manifest_val,
+            trimmed_token,
+            commit_message,
+        )
+        .await;
+    }
 
     let owner = config.repo_owner.trim();
     let repo = config.repo_name.trim();
@@ -2369,7 +3157,8 @@ async fn publish_to_github(
         .to_string();
 
     if let Some(local_sync) = read_sync_state(&base_dir) {
-        if local_sync.repo_owner.eq_ignore_ascii_case(owner)
+        if local_sync.provider.eq_ignore_ascii_case("github")
+            && local_sync.repo_owner.eq_ignore_ascii_case(owner)
             && local_sync.repo_name.eq_ignore_ascii_case(repo)
             && local_sync.branch == branch
             && local_sync.commit_sha != head_sha
@@ -2524,6 +3313,7 @@ async fn publish_to_github(
         let _ = write_sync_state(
             &base_dir,
             &SyncState {
+                provider: "github".into(),
                 repo_owner: owner.to_string(),
                 repo_name: repo.to_string(),
                 branch: branch.to_string(),
@@ -2635,6 +3425,7 @@ async fn publish_to_github(
     let _ = write_sync_state(
         &base_dir,
         &SyncState {
+            provider: "github".into(),
             repo_owner: owner.to_string(),
             repo_name: repo.to_string(),
             branch: branch.to_string(),
@@ -2684,6 +3475,8 @@ fn main() {
             generate_manifest,
             load_github_token,
             save_github_token,
+            load_gitlab_token,
+            save_gitlab_token,
             check_github_access,
             check_remote_sync,
             download_modpack_from_github,

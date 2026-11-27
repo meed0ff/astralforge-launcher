@@ -16,6 +16,7 @@ const diskFreeInfo = document.getElementById("disk-free-info");
 const btnDownloadRepo = document.getElementById("btn-download-repo");
 
 const updateLockBanner = document.getElementById("update-lock-banner");
+const updateLockTitle = document.getElementById("update-lock-title");
 const updateCommitBadge = document.getElementById("update-commit-badge");
 const updateLockDesc = document.getElementById("update-lock-desc");
 const updateLockMeta = document.getElementById("update-lock-meta");
@@ -47,6 +48,7 @@ const repoOwnerInput = document.getElementById("repo-owner");
 const repoNameInput = document.getElementById("repo-name");
 const repoBranchInput = document.getElementById("repo-branch");
 
+const providerBtns = Array.from(document.querySelectorAll(".provider-btn"));
 const githubTokenInput = document.getElementById("github-token");
 const btnToggleToken = document.getElementById("btn-toggle-token");
 const btnCheckGithub = document.getElementById("btn-check-github");
@@ -77,6 +79,49 @@ let fetchedVersions = [];
 let versionRequestSeq = 0;
 let isManagementLocked = false;
 let syncCheckSeq = 0;
+let currentProvider = localStorage.getItem("eternum_manager_provider") === "gitlab" ? "gitlab" : "github";
+const tokensByProvider = { github: "", gitlab: "" };
+
+function providerLabel(p = currentProvider) {
+  return p === "gitlab" ? "GitLab" : "GitHub";
+}
+
+function setProvider(provider, { sync = false } = {}) {
+  currentProvider = provider === "gitlab" ? "gitlab" : "github";
+  localStorage.setItem("eternum_manager_provider", currentProvider);
+  const label = providerLabel(currentProvider);
+
+  for (const btn of providerBtns) {
+    btn.classList.toggle("active", btn.dataset.provider === currentProvider);
+  }
+  if (githubTokenInput) {
+    githubTokenInput.placeholder = currentProvider === "gitlab"
+      ? "Вставьте GitLab Token (glpat-...)"
+      : "Вставьте GitHub Token (ghp_... или github_pat_...)";
+    githubTokenInput.value = tokensByProvider[currentProvider] || "";
+  }
+  if (githubStatusEl) {
+    if (tokensByProvider[currentProvider]) {
+      githubStatusEl.textContent = `✓ Сохранённый ${label} токен загружен (можно нажать «Проверить доступ»).`;
+      githubStatusEl.className = "hint-text ok";
+    } else {
+      githubStatusEl.textContent = `Для публикации на ${label} укажите токен (Collaborator/Developer или токен только для этого репозитория).`;
+      githubStatusEl.className = "hint-text";
+    }
+  }
+  if (btnGeneratePublish) {
+    btnGeneratePublish.textContent = `🚀 СОБРАТЬ И ЗАГРУЗИТЬ НА ${label.toUpperCase()}`;
+  }
+  if (btnDownloadRepo) {
+    btnDownloadRepo.title = `Скачать сборку с ${label} в выбранную папку`;
+  }
+  if (updateLockTitle) {
+    updateLockTitle.textContent = `🔒 На ${label} вышло обновление сборки — требуется скачивание`;
+  }
+  if (sync) {
+    checkRemoteSync();
+  }
+}
 
 function formatBytes(bytes) {
   if (bytes == null || Number.isNaN(bytes)) return "—";
@@ -157,10 +202,12 @@ async function checkRemoteSync() {
   const owner = repoOwnerInput.value.trim() || "meed0ff";
   const repo = repoNameInput.value.trim() || "eternum-modpack";
   const branch = repoBranchInput.value.trim() || "main";
-  const token = githubTokenInput.value.trim();
+  const provider = currentProvider;
+  const label = providerLabel(provider);
+  const token = (tokensByProvider[provider] ?? githubTokenInput.value).trim();
 
   if (badgeSync) {
-    badgeSync.textContent = "GitHub: проверка...";
+    badgeSync.textContent = `${label}: проверка...`;
     badgeSync.className = "pill sync-pill";
   }
 
@@ -170,7 +217,8 @@ async function checkRemoteSync() {
       owner,
       repo,
       branch,
-      token
+      token,
+      provider
     });
     if (seq !== syncCheckSeq) return;
 
@@ -182,13 +230,13 @@ async function checkRemoteSync() {
     );
 
     if (res.status === "up_to_date") {
-      badgeSync.textContent = `✓ GitHub: актуально (${(res.remote_sha || "").slice(0, 7)})`;
+      badgeSync.textContent = `✓ ${label}: актуально (${(res.remote_sha || "").slice(0, 7)})`;
       badgeSync.className = "pill sync-pill ok";
       updateLockBanner.classList.add("hidden");
       setManagementLocked(false);
     } else if (res.status === "update_required") {
       const shortRemote = (res.remote_sha || "").slice(0, 7) || "update";
-      badgeSync.textContent = `⚠ GitHub: есть обнова (${shortRemote})`;
+      badgeSync.textContent = `⚠ ${label}: есть обнова (${shortRemote})`;
       badgeSync.className = "pill sync-pill warn";
       updateCommitBadge.textContent = res.local_sha
         ? `${res.local_sha.slice(0, 7)} → ${shortRemote}`
@@ -211,22 +259,22 @@ async function checkRemoteSync() {
 
       updateLockBanner.classList.remove("hidden");
       setManagementLocked(true);
-      addLog(`🔒 Обнаружено обновление на GitHub (${shortRemote}). Управление заблокировано до скачивания.`, "error");
+      addLog(`🔒 Обнаружено обновление на ${label} (${shortRemote}). Управление заблокировано до скачивания.`, "error");
     } else if (res.status === "uninitialized") {
-      badgeSync.textContent = "GitHub: новая репа";
+      badgeSync.textContent = `${label}: новая репа`;
       badgeSync.className = "pill sync-pill";
       updateLockBanner.classList.add("hidden");
       setManagementLocked(false);
     } else {
-      badgeSync.textContent = "GitHub: не проверено";
+      badgeSync.textContent = `${label}: не проверено`;
       badgeSync.className = "pill sync-pill err";
       updateLockBanner.classList.add("hidden");
       setManagementLocked(false);
-      addLog(`Проверка обновлений GitHub: ${res.message}`, "info");
+      addLog(`Проверка обновлений ${label}: ${res.message}`, "info");
     }
   } catch (err) {
     if (seq !== syncCheckSeq) return;
-    badgeSync.textContent = "GitHub: ошибка";
+    badgeSync.textContent = `${label}: ошибка`;
     badgeSync.className = "pill sync-pill err";
     updateLockBanner.classList.add("hidden");
     setManagementLocked(false);
@@ -244,7 +292,9 @@ async function downloadFromGithub() {
   const owner = repoOwnerInput.value.trim() || "meed0ff";
   const repo = repoNameInput.value.trim() || "eternum-modpack";
   const branch = repoBranchInput.value.trim() || "main";
-  const token = githubTokenInput.value.trim();
+  const provider = currentProvider;
+  const label = providerLabel(provider);
+  const token = (tokensByProvider[provider] ?? githubTokenInput.value).trim();
 
   btnDownloadRepo.disabled = true;
   btnPullUpdate.disabled = true;
@@ -253,7 +303,7 @@ async function downloadFromGithub() {
   if (progressDetails) progressDetails.classList.add("hidden");
   progressFill.style.width = "5%";
   progressPercent.textContent = "5%";
-  progressStatus.textContent = `Скачивание сборки из ${owner}/${repo}...`;
+  progressStatus.textContent = `Скачивание сборки с ${label} (${owner}/${repo})...`;
   logBox.innerHTML = "";
 
   try {
@@ -262,10 +312,11 @@ async function downloadFromGithub() {
       owner,
       repo,
       branch,
-      token
+      token,
+      provider
     });
     showToast(
-      `Сборка скачана (${res.commit_sha.slice(0, 7)})! GitHub: ${res.downloaded_github}, Modrinth: ${res.downloaded_modrinth}, кэш: ${res.skipped_cached}`,
+      `Сборка скачана (${res.commit_sha.slice(0, 7)})! ${label}: ${res.downloaded_github}, Modrinth: ${res.downloaded_modrinth}, кэш: ${res.skipped_cached}`,
       "success"
     );
     await loadFolderOverview(dir);
@@ -574,11 +625,26 @@ btnToggleGuide.addEventListener("click", () => {
   githubGuide.classList.toggle("hidden");
 });
 
+for (const btn of providerBtns) {
+  btn.addEventListener("click", () => {
+    setProvider(btn.dataset.provider, { sync: true });
+  });
+}
+
+if (githubTokenInput) {
+  githubTokenInput.addEventListener("input", () => {
+    tokensByProvider[currentProvider] = githubTokenInput.value;
+  });
+}
+
 btnCheckGithub.addEventListener("click", async () => {
   if (!hasTauri) return;
   const owner = repoOwnerInput.value.trim() || "meed0ff";
   const repo = repoNameInput.value.trim() || "eternum-modpack";
+  const provider = currentProvider;
+  const label = providerLabel(provider);
   const token = githubTokenInput.value.trim();
+  tokensByProvider[provider] = token;
 
   btnCheckGithub.disabled = true;
   btnCheckGithub.textContent = "Проверка...";
@@ -586,15 +652,16 @@ btnCheckGithub.addEventListener("click", async () => {
     const info = await window.__TAURI__.core.invoke("check_github_access", {
       owner,
       repo,
-      token
+      token,
+      provider
     });
     const who = info.login ? `@${info.login}` : "токен";
     if (info.can_push) {
-      githubStatusEl.textContent = `✓ Доступ на запись подтверждён (${who} → ${owner}/${repo}).`;
+      githubStatusEl.textContent = `✓ Доступ на запись ${label} подтверждён (${who} → ${owner}/${repo}).`;
       githubStatusEl.className = "hint-text ok";
-      showToast("Доступ на запись в GitHub подтверждён!", "success");
+      showToast(`Доступ на запись в ${label} подтверждён!`, "success");
     } else {
-      githubStatusEl.textContent = `⚠ ${who} видит ${owner}/${repo}, но прав на запись нет.`;
+      githubStatusEl.textContent = `⚠ ${who} видит ${owner}/${repo} на ${label}, но прав на запись нет.`;
       githubStatusEl.className = "hint-text warn";
       showToast("У этого токена нет прав на запись в репозиторий.", "error");
     }
@@ -611,13 +678,16 @@ btnCheckGithub.addEventListener("click", async () => {
 
 async function runGenerateAndOptionallyPublish(andPublish) {
   if (!hasTauri) return;
+  const provider = currentProvider;
+  const label = providerLabel(provider);
   if (isManagementLocked) {
-    showToast("Сначала скачайте обновление сборки с GitHub!", "error");
+    showToast(`Сначала скачайте обновление сборки с ${label}!`, "error");
     return;
   }
   const token = githubTokenInput.value.trim();
+  tokensByProvider[provider] = token;
   if (andPublish && !token) {
-    showToast("Вставьте GitHub токен в раздел «Доступ для загрузки на GitHub».", "error");
+    showToast(`Вставьте ${label} токен в раздел «Платформа и доступ для загрузки».`, "error");
     githubTokenInput.focus();
     return;
   }
@@ -656,13 +726,14 @@ async function runGenerateAndOptionallyPublish(andPublish) {
       const pub = await window.__TAURI__.core.invoke("publish_to_github", {
         dir,
         token,
-        commitMessage: null
+        commitMessage: null,
+        provider
       });
       if (pub.no_changes) {
-        showToast("manifest.json обновлён — на GitHub уже актуальная версия!", "success");
+        showToast(`manifest.json обновлён — на ${label} уже актуальная версия!`, "success");
       } else {
         showToast(
-          `Опубликовано на GitHub! Обновлено: ${pub.uploaded_count}, удалено: ${pub.removed_count}`,
+          `Опубликовано на ${label}! Обновлено: ${pub.uploaded_count}, удалено: ${pub.removed_count}`,
           "success"
         );
       }
@@ -726,12 +797,13 @@ async function initApp() {
   }
 
   try {
-    const savedToken = await window.__TAURI__.core.invoke("load_github_token");
-    if (savedToken) {
-      githubTokenInput.value = savedToken;
-      githubStatusEl.textContent = "✓ Сохранённый токен загружен (можно нажать «Проверить доступ»).";
-      githubStatusEl.className = "hint-text ok";
-    }
+    const [savedGhToken, savedGlToken] = await Promise.all([
+      window.__TAURI__.core.invoke("load_github_token"),
+      window.__TAURI__.core.invoke("load_gitlab_token")
+    ]);
+    tokensByProvider.github = savedGhToken || "";
+    tokensByProvider.gitlab = savedGlToken || "";
+    setProvider(currentProvider, { sync: false });
     const initialDir = await window.__TAURI__.core.invoke("detect_initial_dir");
     await loadFolderOverview(initialDir);
   } catch (err) {
