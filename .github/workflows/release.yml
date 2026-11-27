@@ -250,3 +250,43 @@ jobs:
             - `EternumModpackManager-linux-x86_64.AppImage` — портативный менеджер сборки
           files: release-assets/*
           make_latest: true
+
+      - name: Sync Release & Assets to GitLab
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN not set; skipping GitLab release sync."
+            exit 0
+          fi
+          TAG="${{ steps.tag.outputs.name }}"
+          GL_PROJ="meed0ff%2Feternum-launcher"
+          PKG_BASE="https://gitlab.com/api/v4/projects/${GL_PROJ}/packages/generic/eternum/${TAG}"
+          LINKS=""
+          for f in release-assets/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            echo "Uploading $name to GitLab Package Registry..."
+            curl --fail --silent --show-error \
+              --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+              --upload-file "$f" \
+              "${PKG_BASE}/${name}"
+            LINK=$(jq -nc --arg name "$name" --arg url "${PKG_BASE}/${name}" '{name: $name, url: $url, link_type: "package"}')
+            if [ -z "$LINKS" ]; then
+              LINKS="$LINK"
+            else
+              LINKS="${LINKS},${LINK}"
+            fi
+          done
+          DESC="Портативные сборки Eternum Launcher и Eternum Modpack Manager (${TAG}) для Windows, Fedora и Linux."
+          PAYLOAD=$(jq -nc --arg name "Eternum Launcher & Modpack Manager (${TAG})" --arg tag "$TAG" --arg desc "$DESC" --argjson links "[$LINKS]" '{name: $name, tag_name: $tag, description: $desc, assets: {links: $links}}')
+          curl --silent --show-error -X DELETE \
+            --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            "https://gitlab.com/api/v4/projects/${GL_PROJ}/releases/${TAG}" >/dev/null || true
+          curl --fail --silent --show-error -X POST \
+            --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            --header "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://gitlab.com/api/v4/projects/${GL_PROJ}/releases"
