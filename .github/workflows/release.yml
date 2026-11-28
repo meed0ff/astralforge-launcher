@@ -79,7 +79,6 @@ jobs:
       - name: Setup Rust Nightly (Win7 target)
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: x86_64-win7-windows-msvc
           components: rust-src
 
       - name: Rust cache (win7)
@@ -107,17 +106,23 @@ jobs:
           Get-ChildItem release-win7 | Select-Object Name, Length
 
       - name: Check Win7 PE imports (must omit Win8/10+ & WebView2 APIs)
-        shell: bash
+        shell: pwsh
         run: |
-          for f in release-win7/*.exe; do
-            echo "Checking imports of $f..."
-            if command -v objdump >/dev/null 2>&1; then
-              if objdump -p "$f" | grep -iE "ProcessPrng|WaitOnAddress|GetSystemTimePreciseAsFileTime|WebView2Loader\.dll|combase\.dll|api-ms-win-core-winrt"; then
-                echo "ERROR: Incompatible Win8/10+ import detected in $f!"
+          $dumpbin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter "dumpbin.exe" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "Hostx64\\x64" } | Select-Object -First 1
+          foreach ($f in Get-ChildItem "release-win7\*.exe") {
+            Write-Host "Checking PE imports of $($f.Name)..."
+            if ($dumpbin) {
+              $imp = & $dumpbin.FullName /IMPORTS $f.FullName | Out-String
+              $bad = $imp | Select-String -Pattern "ProcessPrng|WaitOnAddress|GetSystemTimePreciseAsFileTime|WebView2Loader\.dll|combase\.dll|api-ms-win-core-winrt" -AllMatches
+              if ($bad) {
+                Write-Error "Incompatible Win8/10+ import detected in $($f.Name): $($bad.Matches.Value -join ', ')"
                 exit 1
-              fi
-            fi
-          done
+              }
+              Write-Host "OK: $($f.Name) has zero forbidden Win8/10+/WebView2 PE imports."
+            } else {
+              Write-Host "dumpbin.exe not found; skipping PE check."
+            }
+          }
 
       - name: Upload Windows 7 portable artifacts
         uses: actions/upload-artifact@v4
