@@ -159,10 +159,55 @@ async fn cmd_fetch_manifest_info(
     })
 }
 
+fn format_utc_stamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+
+    // Howard Hinnant's civil-from-days algorithm
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    format!(
+        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
+        year, m, d, hour, min, sec
+    )
+}
+
 fn cmd_open_game_folder() -> Result<(), String> {
     let path = game_launcher::get_game_dir();
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     open::that(&path).map_err(|e| e.to_string())
+}
+
+fn cmd_open_logs_folder() -> Result<(), String> {
+    let path = game_launcher::get_game_dir().join("logs");
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    open::that(&path).map_err(|e| e.to_string())
+}
+
+fn cmd_save_launcher_log(content: String) -> Result<String, String> {
+    let logs_dir = game_launcher::get_game_dir().join("logs");
+    fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let stamp = format_utc_stamp(secs);
+    let dated_path = logs_dir.join(format!("launcher-{}.log", stamp));
+    let latest_path = logs_dir.join("launcher-latest.log");
+    fs::write(&latest_path, content.as_bytes()).map_err(|e| e.to_string())?;
+    fs::write(&dated_path, content.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(dated_path.to_string_lossy().to_string())
 }
 
 async fn cmd_detect_java_installations(
@@ -179,7 +224,7 @@ async fn cmd_install_java_runtime(app: UiHandle, major: u32) -> Result<String, S
         .map_err(|e| e.to_string())?;
     let game_dir = game_launcher::get_game_dir();
     fs::create_dir_all(&game_dir).map_err(|e| e.to_string())?;
-    game_launcher::install_temurin_java(&app, &client, &game_dir, major).await
+    game_launcher::install_temurin_java(&app, &client, &game_dir, major, false).await
 }
 
 async fn cmd_start_sync_and_launch(
@@ -312,6 +357,16 @@ mod tauri_commands {
     }
 
     #[tauri::command]
+    pub fn open_logs_folder() -> Result<(), String> {
+        cmd_open_logs_folder()
+    }
+
+    #[tauri::command]
+    pub fn save_launcher_log(content: String) -> Result<String, String> {
+        cmd_save_launcher_log(content)
+    }
+
+    #[tauri::command]
     pub async fn detect_java_installations(
         required_major: Option<u32>,
     ) -> Result<Vec<JavaInstallationInfo>, String> {
@@ -378,6 +433,15 @@ fn dispatch_web_command(
                 cmd_open_game_folder()?;
                 Ok(Value::Null)
             }
+            "open_logs_folder" => {
+                cmd_open_logs_folder()?;
+                Ok(Value::Null)
+            }
+            "save_launcher_log" => {
+                let content = args["content"].as_str().unwrap_or("").to_string();
+                let path = cmd_save_launcher_log(content)?;
+                Ok(Value::String(path))
+            }
             "detect_java_installations" => {
                 let req = args["requiredMajor"]
                     .as_u64()
@@ -431,6 +495,8 @@ fn main() {
                 tauri_commands::fetch_elyby_skin,
                 tauri_commands::fetch_manifest_info,
                 tauri_commands::open_game_folder,
+                tauri_commands::open_logs_folder,
+                tauri_commands::save_launcher_log,
                 tauri_commands::detect_java_installations,
                 tauri_commands::install_java_runtime,
                 tauri_commands::start_sync_and_launch,

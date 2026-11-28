@@ -14,219 +14,299 @@
     });
   </script>
 </head>
-<body>
+<body class="splash-active">
+  <!-- Startup Splash Screen -->
+  <div id="splash-screen" class="splash-screen" aria-hidden="true">
+    <div class="splash-glow"></div>
+    <div class="splash-center">
+      <div class="splash-logo-wrap">
+        <img src="logo.webp" alt="Eternum" class="splash-logo" />
+      </div>
+      <div class="splash-title-reveal">
+        <div class="splash-title-inner">
+          <div class="splash-title">ETER<span class="accent">NUM</span></div>
+          <div class="splash-subtitle">LAUNCHER</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Custom Window Header -->
   <header class="app-header">
     <div class="logo-area">
       <img src="logo.webp" alt="Eternum" class="header-logo" />
       <span class="logo-title">ETER<span class="accent">NUM</span></span>
-      <span class="version-badge" id="version-badge">26.3 Fabric</span>
+      <span class="version-badge" id="version-badge">1.21.1 Neoforge</span>
     </div>
+
+    <!-- Compact Dynamic Island inside Header -->
+    <div id="dynamic-island" class="dynamic-island hidden-island" aria-live="polite">
+      <div class="di-main-row">
+        <div class="di-icon-wrap" id="di-icon">☕</div>
+        <div class="di-text-col">
+          <div class="di-title-row">
+            <span class="di-title" id="di-title">Java 21</span>
+            <span class="di-meta" id="di-meta"></span>
+            <span class="di-percent" id="di-percent">0%</span>
+          </div>
+          <div class="di-progress-track">
+            <div class="di-progress-fill" id="di-bar-fill"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="window-controls">
       <button id="btn-settings" class="ctrl-btn" title="Настройки">⚙</button>
-      <button id="btn-logs-toggle" class="ctrl-btn" title="Консоль">📜</button>
+      <button id="btn-logs-toggle" class="ctrl-btn" title="Консоль лаунчера">📜</button>
     </div>
   </header>
 
-  <main class="launcher-body">
-    <!-- Server Status Banner -->
-    <section class="server-card">
-      <div class="server-info">
-        <img src="logo.webp" alt="Eternum" class="server-logo" />
-        <div>
-          <div class="server-title-row">
-            <div class="server-status-dot" id="server-dot"></div>
-            <div class="server-name" id="server-title">Eternum</div>
+  <div class="app-workspace">
+    <!-- Main Launch View -->
+    <main class="launcher-body view-panel" id="main-view">
+      <!-- Server Status Banner -->
+      <section class="server-card">
+        <div class="server-info">
+          <img src="logo.webp" alt="Eternum" class="server-logo" />
+          <div>
+            <div class="server-title-row">
+              <div class="server-status-dot" id="server-dot"></div>
+              <div class="server-name" id="server-title">Eternum</div>
+            </div>
+            <div class="server-meta" id="server-meta">Проверка онлайна...</div>
           </div>
-          <div class="server-meta" id="server-meta">Проверка онлайна...</div>
         </div>
-      </div>
-      <div class="server-ip-box" id="server-ip-btn" title="Нажмите, чтобы скопировать">
-        <span id="server-ip-text">eternum.aurorix.pro</span>
-        <span class="copy-icon">📋</span>
-      </div>
-    </section>
+        <div class="server-ip-box" id="server-ip-btn" title="Нажмите, чтобы скопировать">
+          <span id="server-ip-text">eternum.aurorix.pro</span>
+          <span class="copy-icon">📋</span>
+        </div>
+      </section>
 
-    <!-- Center Section: Auth & Settings -->
-    <section class="auth-section">
-      <!-- Tabs: Offline vs Ely.by -->
-      <div class="tabs-header">
-        <button class="tab-btn active" id="tab-elyby">
-          <span class="elyby-icon">🔷</span> Вход через Ely.by
-        </button>
-        <button class="tab-btn" id="tab-offline">
-          <span>👤</span> Офлайн режим
-        </button>
-      </div>
-
-      <!-- Ely.by Tab Content -->
-      <div class="tab-content" id="content-elyby">
-        <!-- Logged out state -->
-        <div id="elyby-logged-out" class="auth-card">
-          <p class="auth-desc">Авторизуйтесь с вашим аккаунтом <b>Ely.by</b>, чтобы получить ваш скин, плащ и имя в игре.</p>
-          <button id="btn-elyby-login" class="btn-elyby">
-            <span class="elyby-logo">◈</span> Войти с Ely.by
+      <!-- Center Section: Auth -->
+      <section class="auth-section">
+        <!-- Tabs: Offline vs Ely.by -->
+        <div class="tabs-header" id="auth-tabs-header" data-active="elyby">
+          <div class="tab-glider" aria-hidden="true"></div>
+          <button class="tab-btn active" id="tab-elyby">
+            <span class="elyby-icon">🔷</span> Вход через Ely.by
+          </button>
+          <button class="tab-btn" id="tab-offline">
+            <span>👤</span> Офлайн режим
           </button>
         </div>
 
-        <!-- Logged in state -->
-        <div id="elyby-logged-in" class="auth-card logged-in hidden">
-          <img id="elyby-avatar" src="https://skin.ely.by/avatars/Astral" alt="Avatar" class="user-avatar" />
-          <div class="user-info">
-            <div class="user-name" id="elyby-username">Игрок</div>
-            <div class="user-status">Авторизован через Ely.by</div>
+        <div class="tabs-stage">
+          <!-- Ely.by Tab Content -->
+          <div class="tab-content" id="content-elyby">
+            <div class="elyby-stage">
+              <div id="elyby-logged-out" class="auth-card">
+                <p class="auth-desc">Авторизуйтесь с вашим аккаунтом <b>Ely.by</b>, чтобы получить ваш скин, плащ и имя в игре.</p>
+                <button id="btn-elyby-login" class="btn-elyby">
+                  <span class="elyby-logo">◈</span> Войти с Ely.by
+                </button>
+              </div>
+
+              <div id="elyby-logged-in" class="auth-card logged-in auth-inactive">
+                <img id="elyby-avatar" src="https://skin.ely.by/avatars/Astral" alt="Avatar" class="user-avatar" />
+                <div class="user-info">
+                  <div class="user-name" id="elyby-username">Игрок</div>
+                  <div class="user-status">Авторизован через Ely.by</div>
+                </div>
+                <button id="btn-elyby-logout" class="btn-logout">Выйти</button>
+              </div>
+            </div>
           </div>
-          <button id="btn-elyby-logout" class="btn-logout">Выйти</button>
+
+          <!-- Offline Tab Content -->
+          <div class="tab-content tab-inactive" id="content-offline">
+            <div class="auth-card">
+              <label for="offline-nick" class="input-label">Ваш игровой никнейм:</label>
+              <div class="input-group">
+                <span class="input-icon">👤</span>
+                <input type="text" id="offline-nick" placeholder="Введите ник (A-Z, 0-9, _)" maxlength="16" />
+              </div>
+            </div>
+          </div>
         </div>
+      </section>
+
+      <!-- Bottom Action Bar -->
+      <footer class="launcher-footer">
+        <div class="progress-container" id="progress-container">
+          <div class="progress-info">
+            <span id="progress-status">Синхронизация с сервером...</span>
+            <span id="progress-percent">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-details hidden" id="progress-details">
+            <span id="progress-bytes"></span>
+            <span id="progress-speed"></span>
+          </div>
+        </div>
+
+        <button id="btn-play" class="btn-play">
+          <span class="play-icon" id="play-icon">▶</span>
+          <span class="play-text" id="play-text">ИГРАТЬ</span>
+        </button>
+      </footer>
+    </main>
+
+    <!-- Full-Screen Detailed Settings View -->
+    <section class="settings-view view-panel view-inactive" id="settings-view" aria-hidden="true">
+      <div class="settings-topbar">
+        <button type="button" id="btn-settings-back" class="btn-secondary settings-back-btn">← Назад</button>
+        <div class="settings-title-block">
+          <h2>Настройки лаунчера</h2>
+          <p class="settings-subtitle">Память, зеркала загрузки, управление Java и диагностика</p>
+        </div>
+        <button type="button" id="btn-save-settings" class="btn-primary">💾 Сохранить</button>
       </div>
 
-      <!-- Offline Tab Content -->
-      <div class="tab-content hidden" id="content-offline">
-        <div class="auth-card">
-          <label for="offline-nick" class="input-label">Ваш игровой никнейм:</label>
-          <div class="input-group">
-            <span class="input-icon">👤</span>
-            <input type="text" id="offline-nick" placeholder="Введите ник (A-Z, 0-9, _)" maxlength="16" />
+      <div class="settings-grid">
+        <!-- Card 1: RAM -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <span class="settings-card-icon">🧠</span>
+            <div>
+              <h3>Оперативная память (RAM)</h3>
+              <p>Рекомендуется 6–8 GB для комфортной игры со сборкой</p>
+            </div>
+          </div>
+          <div class="ram-control-box">
+            <div class="ram-header">
+              <span>Выделено для Minecraft</span>
+              <div class="ram-stepper">
+                <button type="button" class="ram-step-btn" id="ram-dec" title="Уменьшить">−</button>
+                <div class="ram-input-wrap">
+                  <input type="number" id="ram-input" min="2" max="32" step="1" value="6" />
+                  <span class="ram-unit">GB</span>
+                </div>
+                <button type="button" class="ram-step-btn" id="ram-inc" title="Увеличить">+</button>
+              </div>
+            </div>
+            <div class="ram-presets" id="ram-presets">
+              <button type="button" class="ram-preset-btn" data-ram="2">2 GB</button>
+              <button type="button" class="ram-preset-btn" data-ram="4">4 GB</button>
+              <button type="button" class="ram-preset-btn" data-ram="6">6 GB</button>
+              <button type="button" class="ram-preset-btn" data-ram="8">8 GB</button>
+              <button type="button" class="ram-preset-btn" data-ram="10">10 GB</button>
+              <button type="button" class="ram-preset-btn" data-ram="12">12 GB</button>
+              <button type="button" class="ram-preset-btn" data-ram="16">16 GB</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 2: Mirror & Manifest -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <span class="settings-card-icon">🌐</span>
+            <div>
+              <h3>Источник и зеркало</h3>
+              <p>При недоступности основного зеркала выберите альтернативное</p>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Зеркало загрузки сборки:</label>
+            <div class="mirror-tabs" id="mirror-tabs">
+              <button type="button" class="mirror-btn active" data-mirror="github">GitHub</button>
+              <button type="button" class="mirror-btn" data-mirror="gitlab">GitLab (зеркало)</button>
+            </div>
+          </div>
+          <div class="form-group no-margin">
+            <label>URL манифеста (raw):</label>
+            <div class="java-input-row">
+              <input type="text" id="setting-manifest-url" value="https://raw.githubusercontent.com/meed0ff/eternum-modpack/main/manifest.json" />
+              <button type="button" id="btn-check-manifest" class="btn-secondary btn-compact" title="Проверить манифест">🔄</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3: Prism-Style Java Manager (Full Width) -->
+        <div class="settings-card settings-card-full">
+          <div class="settings-card-header settings-card-header-split">
+            <div class="settings-card-title-left">
+              <span class="settings-card-icon">☕</span>
+              <div>
+                <h3>Управление Java</h3>
+                <p>Для текущей сборки <span id="java-req-hint" class="java-req-hint">требуется Java 21</span></p>
+              </div>
+            </div>
+            <div class="java-toolbar">
+              <button type="button" id="btn-java-rescan" class="btn-secondary btn-compact">🔄 Найти Java в системе</button>
+              <button type="button" id="btn-java-install" class="btn-secondary btn-compact">⬇ Скачать Java <span id="java-install-ver">21</span></button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Активный путь к исполняемому файлу Java:</label>
+            <div class="java-input-row">
+              <input type="text" id="setting-java-path" placeholder="Автоопределение (auto)" value="auto" />
+              <button type="button" id="btn-auto-java" class="btn-secondary btn-compact" title="Сбросить на автоматический выбор Java">Авто (auto)</button>
+            </div>
+            <label class="checkbox-row">
+              <input type="checkbox" id="setting-strict-java" checked />
+              <span>Проверять совместимость версии Java при запуске игры (рекомендуется для 1.21.1)</span>
+            </label>
+          </div>
+
+          <div class="java-table-wrap">
+            <table class="java-table">
+              <thead>
+                <tr>
+                  <th>Версия</th>
+                  <th>Арх.</th>
+                  <th>Поставщик</th>
+                  <th>Статус</th>
+                  <th>Путь к java</th>
+                </tr>
+              </thead>
+              <tbody id="java-table-body">
+                <tr><td colspan="5" class="java-empty">Нажмите «Найти Java в системе» для сканирования...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Card 4: Folders & Diagnostics (Full Width) -->
+        <div class="settings-card settings-card-full">
+          <div class="settings-card-header settings-card-header-split">
+            <div class="settings-card-title-left">
+              <span class="settings-card-icon">📁</span>
+              <div>
+                <h3>Файлы и диагностика</h3>
+                <p>Каталог игры и логов: <span class="inline-code">~/.eternum</span></p>
+              </div>
+            </div>
+            <div class="folder-actions-row">
+              <button type="button" id="btn-open-game-folder" class="btn-secondary btn-compact">📁 Папка игры</button>
+              <button type="button" id="btn-open-logs-folder" class="btn-secondary btn-compact">📂 Папка логов</button>
+              <button type="button" id="btn-settings-save-log" class="btn-secondary btn-compact">💾 Сохранить лог лаунчера</button>
+            </div>
           </div>
         </div>
       </div>
     </section>
+  </div>
 
-    <!-- Bottom Action Bar -->
-    <footer class="launcher-footer">
-      <!-- Progress Bar (Visible during sync/download) -->
-      <div class="progress-container" id="progress-container">
-        <div class="progress-info">
-          <span id="progress-status">Синхронизация с сервером...</span>
-          <span id="progress-percent">0%</span>
-        </div>
-        <div class="progress-bar-bg">
-          <div class="progress-bar-fill" id="progress-fill"></div>
-        </div>
-        <div class="progress-details hidden" id="progress-details">
-          <span id="progress-bytes"></span>
-          <span id="progress-speed"></span>
-        </div>
-      </div>
-
-      <!-- Play Button -->
-      <button id="btn-play" class="btn-play">
-        <span class="play-icon" id="play-icon">▶</span>
-        <span class="play-text" id="play-text">ИГРАТЬ</span>
-      </button>
-    </footer>
-  </main>
-
-  <!-- Logs Drawer -->
+  <!-- Logs Drawer (Resizable + Copyable + Saveable) -->
   <div class="logs-drawer" id="logs-drawer">
+    <div class="logs-resize-handle" id="logs-resize-handle" title="Потяните вверх или вниз, чтобы изменить высоту консоли">
+      <div class="logs-resize-grip"></div>
+    </div>
     <div class="logs-header">
       <span>Консоль лаунчера</span>
-      <button id="btn-logs-close" class="close-logs-btn">✕</button>
+      <div class="logs-actions">
+        <button type="button" id="btn-logs-copy" class="logs-action-btn" title="Копировать выделенный текст или весь лог">📋 Копировать</button>
+        <button type="button" id="btn-logs-save" class="logs-action-btn" title="Сохранить лог в папку ~/.eternum/logs">💾 Сохранить лог</button>
+        <button type="button" id="btn-logs-clear" class="logs-action-btn" title="Очистить консоль">🧹 Очистить</button>
+        <button type="button" id="btn-logs-close" class="close-logs-btn" title="Скрыть консоль">✕</button>
+      </div>
     </div>
     <div class="logs-content" id="logs-content">
       <div class="log-line info">[System] Eternum Launcher инициализирован.</div>
-    </div>
-  </div>
-
-  <!-- Settings Modal -->
-  <div class="modal-overlay hidden" id="settings-modal">
-    <div class="modal-box">
-      <div class="modal-header">
-        <h3>Настройки лаунчера</h3>
-        <button id="btn-modal-close" class="close-btn">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="ram-control-box">
-          <div class="ram-header">
-            <span>Оперативная память (RAM)</span>
-            <div class="ram-stepper">
-              <button type="button" class="ram-step-btn" id="ram-dec" title="Уменьшить">−</button>
-              <div class="ram-input-wrap">
-                <input type="number" id="ram-input" min="2" max="32" step="1" value="6" />
-                <span class="ram-unit">GB</span>
-              </div>
-              <button type="button" class="ram-step-btn" id="ram-inc" title="Увеличить">+</button>
-            </div>
-          </div>
-          <div class="ram-presets" id="ram-presets">
-            <button type="button" class="ram-preset-btn" data-ram="2">2 GB</button>
-            <button type="button" class="ram-preset-btn" data-ram="4">4 GB</button>
-            <button type="button" class="ram-preset-btn" data-ram="6">6 GB</button>
-            <button type="button" class="ram-preset-btn" data-ram="8">8 GB</button>
-            <button type="button" class="ram-preset-btn" data-ram="10">10 GB</button>
-            <button type="button" class="ram-preset-btn" data-ram="12">12 GB</button>
-            <button type="button" class="ram-preset-btn" data-ram="16">16 GB</button>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Источник скачивания (зеркало):</label>
-          <div class="mirror-tabs" id="mirror-tabs">
-            <button type="button" class="mirror-btn active" data-mirror="github">GitHub</button>
-            <button type="button" class="mirror-btn" data-mirror="gitlab">GitLab (зеркало)</button>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>URL манифеста (raw):</label>
-          <input type="text" id="setting-manifest-url" value="https://raw.githubusercontent.com/meed0ff/eternum-modpack/main/manifest.json" />
-        </div>
-        <div class="form-group">
-          <label>Путь к Java (<span id="java-req-hint" class="java-req-hint">требуется Java 21</span>):</label>
-          <div class="java-input-row">
-            <input type="text" id="setting-java-path" placeholder="Автоопределение (auto)" value="auto" />
-            <button type="button" id="btn-detect-java" class="btn-secondary btn-compact" title="Окно автоопределения версий Java в системе">🔍 Автопоиск</button>
-            <button type="button" id="btn-auto-java" class="btn-secondary btn-compact" title="Сбросить на автоматический выбор Java">Авто</button>
-          </div>
-          <label class="checkbox-row">
-            <input type="checkbox" id="setting-strict-java" checked />
-            <span>Проверять совместимость версии Java при запуске</span>
-          </label>
-        </div>
-        <div class="form-group">
-          <label>Каталог игры:</label>
-          <div class="folder-path-display">~/.eternum</div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button id="btn-open-game-folder" class="btn-secondary">📁 Открыть папку игры</button>
-        <button id="btn-save-settings" class="btn-primary">Сохранить</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Prism-style Java Detector Modal -->
-  <div class="modal-overlay hidden" id="java-modal">
-    <div class="modal-box modal-box-wide">
-      <div class="modal-header">
-        <div>
-          <h3>☕ Выбор Java в системе</h3>
-          <div class="java-modal-subtitle" id="java-modal-subtitle">Требуется: Java 21 (автопоиск скачает Temurin 21 при отсутствии)</div>
-        </div>
-        <button id="btn-java-modal-close" class="close-btn">✕</button>
-      </div>
-      <div class="java-toolbar">
-        <button type="button" id="btn-java-rescan" class="btn-secondary btn-compact">🔄 Обновить список</button>
-        <button type="button" id="btn-java-install" class="btn-secondary btn-compact">⬇ Скачать Java <span id="java-install-ver">21</span></button>
-      </div>
-      <div class="java-table-wrap">
-        <table class="java-table">
-          <thead>
-            <tr>
-              <th>Версия</th>
-              <th>Арх.</th>
-              <th>Поставщик</th>
-              <th>Статус</th>
-              <th>Путь к java</th>
-            </tr>
-          </thead>
-          <tbody id="java-table-body">
-            <tr><td colspan="5" class="java-empty">Нажмите «Обновить список» для поиска Java...</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="modal-footer">
-        <button type="button" id="btn-java-use-auto" class="btn-secondary">Использовать Авто (auto)</button>
-        <button type="button" id="btn-java-apply" class="btn-primary">Выбрать указанную Java</button>
-      </div>
     </div>
   </div>
 

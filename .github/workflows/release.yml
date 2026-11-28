@@ -287,38 +287,76 @@ jobs:
           name: fedora-portable
           path: release-assets
 
-      - name: Determine release tag
+      - name: Checkout repository for changelog
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release tag & changelog notes
         id: tag
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ github.event.inputs.tag }}"
           else
-            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ github.ref_name }}"
           fi
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
+
+          CHANGELOG_NOTES=""
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG_NOTES=$(awk -v ver="$TAG" '
+              /^## \[/ {
+                if (found) exit
+                if ($0 ~ "\\[" ver "\\]") { found=1; print; next }
+              }
+              found { print }
+            ' CHANGELOG.md)
+          fi
+
+          if [ -z "$CHANGELOG_NOTES" ]; then
+            PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+            if [ -n "$PREV_TAG" ]; then
+              CHANGELOG_NOTES=$(git log --no-merges --pretty=format:"- %s" "${PREV_TAG}..${TAG}" 2>/dev/null || true)
+            else
+              CHANGELOG_NOTES=$(git log --no-merges -n 15 --pretty=format:"- %s" 2>/dev/null || true)
+            fi
+          fi
+
+          {
+            if [ -n "$CHANGELOG_NOTES" ]; then
+              echo "## Что нового в ${TAG}"
+              echo ""
+              echo "$CHANGELOG_NOTES"
+              echo ""
+              echo "---"
+              echo ""
+            fi
+            printf '%s\n' \
+              "Портативные сборки **Eternum Launcher** и **Eternum Modpack Manager** для **Windows 10/11**, **Windows 7 (без WebView2)** и **Linux** (без установщиков)." \
+              "" \
+              "### Windows 10/11 (x64)" \
+              "- \`EternumLauncher-win64.exe\` — лаунчер для игроков" \
+              "- \`EternumModpackManager-win64.exe\` — менеджер сборки для администраторов" \
+              "" \
+              "### Windows 7 SP1 (x64, без WebView2 — открывает UI в браузере)" \
+              "- \`EternumLauncher-win7-x64.exe\` — лаунчер для Windows 7" \
+              "- \`EternumModpackManager-win7-x64.exe\` — менеджер сборки для Windows 7" \
+              "" \
+              "### Fedora / Linux (нативные бинарники)" \
+              "- \`EternumLauncher-fedora-x86_64\` — нативный бинарник лаунчера (\`chmod +x\` и \`./EternumLauncher-fedora-x86_64\`)" \
+              "- \`EternumModpackManager-fedora-x86_64\` — нативный бинарник менеджера сборки" \
+              "" \
+              "### Linux (универсальный AppImage)" \
+              "- \`EternumLauncher-linux-x86_64.AppImage\` — портативный лаунчер" \
+              "- \`EternumModpackManager-linux-x86_64.AppImage\` — портативный менеджер сборки"
+          } > release_body.md
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Eternum Launcher & Modpack Manager (${{ steps.tag.outputs.name }})
-          body: |
-            Портативные сборки **Eternum Launcher** и **Eternum Modpack Manager** для **Windows 10/11**, **Windows 7 (без WebView2)** и **Linux** (без установщиков).
-
-            ### Windows 10/11 (x64)
-            - `EternumLauncher-win64.exe` — лаунчер для игроков
-            - `EternumModpackManager-win64.exe` — менеджер сборки для администраторов
-
-            ### Windows 7 SP1 (x64, без WebView2 — открывает UI в браузере)
-            - `EternumLauncher-win7-x64.exe` — лаунчер для Windows 7
-            - `EternumModpackManager-win7-x64.exe` — менеджер сборки для Windows 7
-
-            ### Fedora / Linux (нативные бинарники)
-            - `EternumLauncher-fedora-x86_64` — нативный бинарник лаунчера (`chmod +x` и `./EternumLauncher-fedora-x86_64`)
-            - `EternumModpackManager-fedora-x86_64` — нативный бинарник менеджера сборки
-
-            ### Linux (универсальный AppImage)
-            - `EternumLauncher-linux-x86_64.AppImage` — портативный лаунчер
-            - `EternumModpackManager-linux-x86_64.AppImage` — портативный менеджер сборки
+          body_path: release_body.md
           files: release-assets/*
           make_latest: true
 
@@ -351,8 +389,7 @@ jobs:
               LINKS="${LINKS},${LINK}"
             fi
           done
-          DESC="Портативные сборки Eternum Launcher и Eternum Modpack Manager (${TAG}) для Windows, Fedora и Linux."
-          PAYLOAD=$(jq -nc --arg name "Eternum Launcher & Modpack Manager (${TAG})" --arg tag "$TAG" --arg desc "$DESC" --argjson links "[$LINKS]" '{name: $name, tag_name: $tag, description: $desc, assets: {links: $links}}')
+          PAYLOAD=$(jq -nc --arg name "Eternum Launcher & Modpack Manager (${TAG})" --arg tag "$TAG" --rawfile desc release_body.md --argjson links "[$LINKS]" '{name: $name, tag_name: $tag, description: $desc, assets: {links: $links}}')
           curl --silent --show-error -X DELETE \
             --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
             "https://gitlab.com/api/v4/projects/${GL_PROJ}/releases/${TAG}" >/dev/null || true

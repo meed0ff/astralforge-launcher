@@ -309,6 +309,17 @@ async fn ensure_vanilla_installed(
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct JavaProgressPayload {
+    pub stage: String,
+    pub major: u32,
+    pub percent: u32,
+    pub status: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub speed_bps: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct JavaInstallationInfo {
     pub path: String,
     pub version: String,
@@ -791,12 +802,142 @@ fn extract_zip_strip_root(archive_path: &Path, target_dir: &Path) -> Result<(), 
     Ok(())
 }
 
+async fn download_java_archive_with_island(
+    app: &UiHandle,
+    client: &reqwest::Client,
+    url: &str,
+    target_path: &Path,
+    required_major: u32,
+) -> Result<(), String> {
+    use std::time::{Duration, Instant};
+
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp_path = target_path.with_extension("download_tmp");
+
+    let resp = client
+        .get(url)
+        .header("User-Agent", "Eternum-Launcher/1.0")
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к Adoptium: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Adoptium вернул HTTP {}", resp.status()));
+    }
+
+    let total = resp.content_length().unwrap_or(0);
+    let mut stream = resp.bytes_stream();
+    let mut out_file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut downloaded: u64 = 0;
+    let mut window_bytes: u64 = 0;
+    let mut window_start = Instant::now();
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let mut smooth_speed_bps: u64 = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| format!("Ошибка чтения потока Java: {}", e))?;
+        let len = chunk.len() as u64;
+        tokio::io::AsyncWriteExt::write_all(&mut out_file, &chunk)
+            .await
+            .map_err(|e| e.to_string())?;
+        downloaded = downloaded.saturating_add(len);
+        window_bytes = window_bytes.saturating_add(len);
+
+        if last_emit.elapsed() >= Duration::from_millis(100) {
+            let dt = window_start.elapsed().as_secs_f64().max(0.001);
+            let inst_speed = (window_bytes as f64 / dt) as u64;
+            smooth_speed_bps = if smooth_speed_bps == 0 {
+                inst_speed
+            } else {
+                ((smooth_speed_bps as f64 * 0.6) + (inst_speed as f64 * 0.4)) as u64
+            };
+            let pct = if total > 0 {
+                ((downloaded as f64 / total as f64) * 88.0) as u32
+            } else {
+                40
+            };
+            let _ = app.emit(
+                "java-progress",
+                JavaProgressPayload {
+                    stage: "downloading".into(),
+                    major: required_major,
+                    percent: pct.min(88),
+                    status: format!("Скачивание Java {}...", required_major),
+                    downloaded,
+                    total: total.max(downloaded),
+                    speed_bps: smooth_speed_bps,
+                },
+            );
+            last_emit = Instant::now();
+            if window_start.elapsed() >= Duration::from_millis(500) {
+                window_bytes = 0;
+                window_start = Instant::now();
+            }
+        }
+    }
+
+    tokio::io::AsyncWriteExt::flush(&mut out_file)
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(out_file);
+
+    let _ = app.emit(
+        "java-progress",
+        JavaProgressPayload {
+            stage: "downloading".into(),
+            major: required_major,
+            percent: 88,
+            status: format!("Загрузка Java {} завершена", required_major),
+            downloaded,
+            total: total.max(downloaded),
+            speed_bps: smooth_speed_bps,
+        },
+    );
+
+    if target_path.exists() {
+        let _ = std::fs::remove_file(target_path);
+    }
+    std::fs::rename(&tmp_path, target_path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn install_temurin_java(
     app: &UiHandle,
     client: &reqwest::Client,
     game_dir: &Path,
     required_major: u32,
+    emit_launch_progress: bool,
 ) -> Result<String, String> {
+    let java_exe = if cfg!(windows) { "java.exe" } else { "java" };
+    let runtime_dir = game_dir.join("runtime");
+    let target_java_dir = runtime_dir.join(format!("java-{}", required_major));
+    let installed_java = target_java_dir.join("bin").join(java_exe);
+
+    // Не перекачиваем, если управляемая Java нужной версии уже установлена и работает
+    if installed_java.is_file() {
+        if let Some((ver, full_ver, _, _)) = check_java_version_detail(&installed_java).await {
+            if ver == required_major {
+                let _ = app.emit(
+                    "java-progress",
+                    JavaProgressPayload {
+                        stage: "done".into(),
+                        major: required_major,
+                        percent: 100,
+                        status: format!("Java {} ({}) уже установлена!", required_major, full_ver),
+                        downloaded: 0,
+                        total: 0,
+                        speed_bps: 0,
+                    },
+                );
+                return Ok(installed_java.to_string_lossy().to_string());
+            }
+        }
+    }
+
     let os = if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -815,31 +956,72 @@ pub async fn install_temurin_java(
         required_major, os, arch
     );
 
-    let runtime_dir = game_dir.join("runtime");
-    let target_java_dir = runtime_dir.join(format!("java-{}", required_major));
     std::fs::create_dir_all(&target_java_dir).map_err(|e| e.to_string())?;
 
     let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
     let archive_path = runtime_dir.join(format!("temurin-{}.{}", required_major, ext));
 
+    if emit_launch_progress {
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 85,
+                status: format!("Скачивание Eclipse Temurin {}...", required_major),
+                log: Some(format!("Скачивание Java {} с Adoptium: {}", required_major, download_url)),
+            },
+        );
+    }
+
     let _ = app.emit(
-        "download-progress",
-        ProgressPayload {
-            percent: 85,
-            status: format!("Java {} не найдена. Скачивание Eclipse Temurin {}...", required_major, required_major),
-            log: Some(format!("Скачивание Java {} с Adoptium: {}", required_major, download_url)),
+        "java-progress",
+        JavaProgressPayload {
+            stage: "downloading".into(),
+            major: required_major,
+            percent: 2,
+            status: format!("Подключение к Adoptium (Java {})...", required_major),
+            downloaded: 0,
+            total: 0,
+            speed_bps: 0,
         },
     );
 
-    let java_tracker = DownloadTracker::new(0);
-    download_file_tracked(app, &java_tracker, client, &download_url, &archive_path, "", 0).await?;
+    if let Err(err) = download_java_archive_with_island(app, client, &download_url, &archive_path, required_major).await {
+        let _ = app.emit(
+            "java-progress",
+            JavaProgressPayload {
+                stage: "error".into(),
+                major: required_major,
+                percent: 0,
+                status: format!("Ошибка скачивания Java {}: {}", required_major, err),
+                downloaded: 0,
+                total: 0,
+                speed_bps: 0,
+            },
+        );
+        return Err(err);
+    }
+
+    if emit_launch_progress {
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 86,
+                status: format!("Распаковка Java {}...", required_major),
+                log: Some("Распаковка архива Java...".into()),
+            },
+        );
+    }
 
     let _ = app.emit(
-        "download-progress",
-        ProgressPayload {
-            percent: 86,
+        "java-progress",
+        JavaProgressPayload {
+            stage: "extracting".into(),
+            major: required_major,
+            percent: 92,
             status: format!("Распаковка Java {}...", required_major),
-            log: Some("Распаковка архива Java...".into()),
+            downloaded: 0,
+            total: 0,
+            speed_bps: 0,
         },
     );
 
@@ -851,7 +1033,21 @@ pub async fn install_temurin_java(
             .await
             .map_err(|e| format!("Ошибка распаковки Java: {}", e))?;
         let _ = std::fs::remove_file(&archive_path);
-        res?;
+        if let Err(err) = res {
+            let _ = app.emit(
+                "java-progress",
+                JavaProgressPayload {
+                    stage: "error".into(),
+                    major: required_major,
+                    percent: 0,
+                    status: format!("Ошибка распаковки Java {}: {}", required_major, err),
+                    downloaded: 0,
+                    total: 0,
+                    speed_bps: 0,
+                },
+            );
+            return Err(err);
+        }
     }
 
     #[cfg(not(windows))]
@@ -870,18 +1066,66 @@ pub async fn install_temurin_java(
             .map_err(|e| format!("Не удалось распаковать Java: {}", e))?;
         let _ = std::fs::remove_file(&archive_path);
         if !extract_status.success() {
-            return Err("Ошибка при распаковке архива Java.".into());
+            let err = "Ошибка при распаковке архива Java.".to_string();
+            let _ = app.emit(
+                "java-progress",
+                JavaProgressPayload {
+                    stage: "error".into(),
+                    major: required_major,
+                    percent: 0,
+                    status: err.clone(),
+                    downloaded: 0,
+                    total: 0,
+                    speed_bps: 0,
+                },
+            );
+            return Err(err);
         }
     }
 
-    let java_exe = if cfg!(windows) { "java.exe" } else { "java" };
-    let installed_java = target_java_dir.join("bin").join(java_exe);
     if !installed_java.exists() {
-        return Err(format!(
+        let err = format!(
             "После распаковки не найден исполняемый файл Java: {}",
             installed_java.display()
-        ));
+        );
+        let _ = app.emit(
+            "java-progress",
+            JavaProgressPayload {
+                stage: "error".into(),
+                major: required_major,
+                percent: 0,
+                status: err.clone(),
+                downloaded: 0,
+                total: 0,
+                speed_bps: 0,
+            },
+        );
+        return Err(err);
     }
+
+    if emit_launch_progress {
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 88,
+                status: format!("Java {} установлена!", required_major),
+                log: Some(format!("✓ Java {} установлена: {}", required_major, installed_java.display())),
+            },
+        );
+    }
+
+    let _ = app.emit(
+        "java-progress",
+        JavaProgressPayload {
+            stage: "done".into(),
+            major: required_major,
+            percent: 100,
+            status: format!("Java {} (Eclipse Temurin) готова!", required_major),
+            downloaded: 0,
+            total: 0,
+            speed_bps: 0,
+        },
+    );
 
     Ok(installed_java.to_string_lossy().to_string())
 }
@@ -965,7 +1209,7 @@ pub async fn resolve_or_install_java(
         return Ok(exact.path);
     }
 
-    install_temurin_java(app, client, game_dir, required_major).await
+    install_temurin_java(app, client, game_dir, required_major, true).await
 }
 
 fn loader_profile_name(loader_type: &str, mc_version: &str, loader_version: &str) -> String {
