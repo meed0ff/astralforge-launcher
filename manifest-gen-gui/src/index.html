@@ -134,25 +134,35 @@
           <div class="provider-header-left">
             <span class="field-label" style="margin-bottom:0;">3. Платформа и доступ для загрузки (токены сохраняются локально)</span>
             <div class="provider-tabs" id="provider-tabs">
-              <button type="button" class="provider-btn active" data-provider="github">GitHub</button>
+              <button type="button" class="provider-btn active" data-provider="both">GitHub + GitLab</button>
+              <button type="button" class="provider-btn" data-provider="github">GitHub</button>
               <button type="button" class="provider-btn" data-provider="gitlab">GitLab</button>
             </div>
           </div>
           <button type="button" id="btn-toggle-guide" class="link-btn">Как выдать доступ подруге?</button>
         </div>
-        <div class="token-row">
-          <input type="password" id="github-token" placeholder="Вставьте GitHub Token (ghp_... или github_pat_...)" />
-          <button type="button" id="btn-toggle-token" class="btn-secondary icon-only" title="Показать/скрыть токен">👁</button>
-          <button type="button" id="btn-check-github" class="btn-secondary">🔍 Проверить доступ</button>
+        <div class="tokens-stack">
+          <div class="token-row" id="github-token-row">
+            <span class="token-badge">GitHub</span>
+            <input type="password" id="github-token" placeholder="GitHub Token (ghp_... или github_pat_...)" />
+            <button type="button" id="btn-toggle-gh-token" class="btn-secondary icon-only" title="Показать/скрыть GitHub токен">👁</button>
+            <button type="button" id="btn-check-github" class="btn-secondary">🔍 Проверить</button>
+          </div>
+          <div class="token-row" id="gitlab-token-row">
+            <span class="token-badge gitlab">GitLab</span>
+            <input type="password" id="gitlab-token" placeholder="GitLab Token (glpat-...)" />
+            <button type="button" id="btn-toggle-gl-token" class="btn-secondary icon-only" title="Показать/скрыть GitLab токен">👁</button>
+            <button type="button" id="btn-check-gitlab" class="btn-secondary">🔍 Проверить</button>
+          </div>
         </div>
-        <div class="hint-text" id="github-status">Для публикации на сервер укажите токен (Collaborator/Developer или токен только для этого репозитория).</div>
+        <div class="hint-text" id="github-status">Для одновременной публикации на GitHub и GitLab укажите оба токена (сохраняются локально).</div>
 
         <div class="guide-box hidden" id="github-guide">
           <b>Как выдать доступ только нужным людям (например, подруге):</b>
           <ol>
             <li><b>GitHub:</b> откройте <code>meed0ff/eternum-modpack</code> → <b>Settings → Collaborators → Add people</b> (права <b>Write</b>). Помощник создаёт <b>Fine-grained token</b> (<code>github.com/settings/tokens?type=beta</code>) для <code>eternum-modpack</code> с правом <b>Contents: Read and write</b>.</li>
             <li><b>GitLab:</b> откройте проект → <b>Manage → Members → Invite members</b> (роль <b>Developer</b>) и создайте токен (<b>Personal/Project Access Token</b>) со скопами <code>api</code> или <code>read_repository</code> + <code>write_repository</code>.</li>
-            <li>Вставьте токен в поле выше — программа запоминает его отдельно для GitHub и GitLab локально на этом ПК.</li>
+            <li>Вставьте токены выше — менеджер сохранит их локально и в режиме <b>GitHub + GitLab</b> загрузит сборку сразу в оба репозитория.</li>
           </ol>
         </div>
 
@@ -180,12 +190,11 @@
     <section class="card action-card">
       <div class="action-top">
         <div class="action-buttons">
-          <button type="button" id="btn-generate-publish" class="btn-generate">🚀 СОБРАТЬ И ЗАГРУЗИТЬ НА GITHUB</button>
+          <button type="button" id="btn-generate-publish" class="btn-generate">🚀 СОБРАТЬ И ЗАГРУЗИТЬ (GITHUB + GITLAB)</button>
           <button type="button" id="btn-generate" class="btn-secondary btn-local-gen">📄 Только manifest.json</button>
         </div>
         <div class="stats-row" id="stats-row">
-          <span class="stat-item">Modrinth: <b id="stat-modrinth">—</b></span>
-          <span class="stat-item">GitHub: <b id="stat-github">—</b></span>
+          <span class="stat-item">Моды (в Git): <b id="stat-github">—</b></span>
           <span class="stat-item">Доп.: <b id="stat-extra">—</b></span>
           <span class="stat-item">Бандлы: <b id="stat-bundles">—</b></span>
         </div>

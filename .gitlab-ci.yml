@@ -23,13 +23,24 @@ build-linux:
     - apt-get update && apt-get install -y nodejs
     - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     - export PATH="$HOME/.cargo/bin:$PATH"
-    - cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --bundles appimage
-    - cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --bundles appimage
-    - mkdir -p "$CI_PROJECT_DIR/release-linux"
-    - LAUNCHER_AI=$(find "$CI_PROJECT_DIR/launcher/src-tauri/target/release/bundle/appimage" -maxdepth 1 -name "*.AppImage" | head -n 1)
-    - MANAGER_AI=$(find "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/bundle/appimage" -maxdepth 1 -name "*.AppImage" | head -n 1)
-    - cp "$LAUNCHER_AI" "$CI_PROJECT_DIR/release-linux/EternumLauncher-linux-x86_64.AppImage"
-    - cp "$MANAGER_AI" "$CI_PROJECT_DIR/release-linux/EternumModpackManager-linux-x86_64.AppImage"
+    - |
+      mkdir -p "$CI_PROJECT_DIR/release-linux"
+      case "${CI_COMMIT_TAG}" in
+        *-manager)
+          cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --bundles appimage
+          ;;
+        *-launcher)
+          cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --bundles appimage
+          ;;
+        *)
+          cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --bundles appimage
+          cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --bundles appimage
+          ;;
+      esac
+    - LAUNCHER_AI=$(find "$CI_PROJECT_DIR/launcher/src-tauri/target/release/bundle/appimage" -maxdepth 1 -name "*.AppImage" 2>/dev/null | head -n 1)
+    - MANAGER_AI=$(find "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/bundle/appimage" -maxdepth 1 -name "*.AppImage" 2>/dev/null | head -n 1)
+    - 'if [ -n "$LAUNCHER_AI" ]; then cp "$LAUNCHER_AI" "$CI_PROJECT_DIR/release-linux/EternumLauncher-linux-x86_64.AppImage"; fi'
+    - 'if [ -n "$MANAGER_AI" ]; then cp "$MANAGER_AI" "$CI_PROJECT_DIR/release-linux/EternumModpackManager-linux-x86_64.AppImage"; fi'
     - chmod +x "$CI_PROJECT_DIR/release-linux/"*.AppImage
   artifacts:
     name: "linux-portable-$CI_COMMIT_SHORT_SHA"
@@ -44,11 +55,22 @@ build-fedora:
     - dnf install -y webkit2gtk4.1-devel openssl-devel curl wget file tar gzip git gcc gcc-c++ pkgconf-pkg-config libappindicator-gtk3-devel librsvg2-devel nodejs npm
     - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     - export PATH="$HOME/.cargo/bin:$PATH"
-    - cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --no-bundle
-    - cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --no-bundle
-    - mkdir -p "$CI_PROJECT_DIR/release-fedora"
-    - cp "$CI_PROJECT_DIR/launcher/src-tauri/target/release/eternum-launcher" "$CI_PROJECT_DIR/release-fedora/EternumLauncher-fedora-x86_64"
-    - cp "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/eternum-manifest-studio" "$CI_PROJECT_DIR/release-fedora/EternumModpackManager-fedora-x86_64"
+    - |
+      mkdir -p "$CI_PROJECT_DIR/release-fedora"
+      case "${CI_COMMIT_TAG}" in
+        *-manager)
+          cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --no-bundle
+          ;;
+        *-launcher)
+          cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --no-bundle
+          ;;
+        *)
+          cd "$CI_PROJECT_DIR/launcher" && npm ci && npx tauri build --no-bundle
+          cd "$CI_PROJECT_DIR/manifest-gen-gui" && npm ci && npx tauri build --no-bundle
+          ;;
+      esac
+    - '[ -f "$CI_PROJECT_DIR/launcher/src-tauri/target/release/eternum-launcher" ] && cp "$CI_PROJECT_DIR/launcher/src-tauri/target/release/eternum-launcher" "$CI_PROJECT_DIR/release-fedora/EternumLauncher-fedora-x86_64" || true'
+    - '[ -f "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/eternum-manifest-studio" ] && cp "$CI_PROJECT_DIR/manifest-gen-gui/src-tauri/target/release/eternum-manifest-studio" "$CI_PROJECT_DIR/release-fedora/EternumModpackManager-fedora-x86_64" || true'
     - chmod +x "$CI_PROJECT_DIR/release-fedora/"*
   artifacts:
     name: "fedora-portable-$CI_COMMIT_SHORT_SHA"

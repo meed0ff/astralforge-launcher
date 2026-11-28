@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -20,7 +20,6 @@ use ui_bridge::UiHandle;
 const CONFIG_FILE: &str = "repo_config.json";
 const MANIFEST_FILE: &str = "manifest.json";
 const SYNC_STATE_FILE: &str = ".eternum-sync.json";
-const MODRINTH_API: &str = "https://api.modrinth.com/v2/version_files";
 const USER_AGENT: &str = "Eternum-ModpackManager/1.0";
 
 const EXTRA_DIRS: &[&str] = &[
@@ -151,11 +150,15 @@ pub struct GithubAccessInfo {
 #[derive(Debug, Serialize)]
 pub struct PublishSummary {
     pub commit_sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_commit_sha: Option<String>,
     pub uploaded_count: usize,
     pub reused_count: usize,
     pub removed_count: usize,
     pub no_changes: bool,
     pub repo_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub second_repo_url: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -169,9 +172,19 @@ fn normalize_provider(provider: Option<&str>) -> &'static str {
     }
 }
 
+fn normalize_publish_target(provider: Option<&str>) -> &'static str {
+    match provider.map(|s| s.trim()) {
+        Some(p) if p.eq_ignore_ascii_case("both") => "both",
+        Some(p) if p.eq_ignore_ascii_case("gitlab") => "gitlab",
+        _ => "github",
+    }
+}
+
 fn provider_label(provider: &str) -> &'static str {
     if provider.eq_ignore_ascii_case("gitlab") {
         "GitLab"
+    } else if provider.eq_ignore_ascii_case("both") {
+        "GitHub + GitLab"
     } else {
         "GitHub"
     }
@@ -184,9 +197,36 @@ pub struct SyncState {
     pub repo_owner: String,
     pub repo_name: String,
     pub branch: String,
+    #[serde(default)]
     pub commit_sha: String,
     #[serde(default)]
+    pub github_sha: Option<String>,
+    #[serde(default)]
+    pub gitlab_sha: Option<String>,
+    #[serde(default)]
     pub pack_version: String,
+}
+
+impl SyncState {
+    fn sha_for(&self, prov: &str) -> Option<&str> {
+        if prov.eq_ignore_ascii_case("gitlab") {
+            self.gitlab_sha.as_deref().or_else(|| {
+                if self.provider.eq_ignore_ascii_case("gitlab") && !self.commit_sha.is_empty() {
+                    Some(self.commit_sha.as_str())
+                } else {
+                    None
+                }
+            })
+        } else {
+            self.github_sha.as_deref().or_else(|| {
+                if !self.provider.eq_ignore_ascii_case("gitlab") && !self.commit_sha.is_empty() {
+                    Some(self.commit_sha.as_str())
+                } else {
+                    None
+                }
+            })
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -269,7 +309,6 @@ struct ModEntry {
     filename: String,
     rel_path: String,
     sha256: String,
-    sha512: String,
     size: u64,
 }
 
@@ -319,7 +358,6 @@ fn compute_hashes(path: &Path) -> Result<(String, String, u64), String> {
     let mut file =
         fs::File::open(path).map_err(|e| format!("Не удалось открыть {}: {}", path.display(), e))?;
     let mut sha256 = Sha256::new();
-    let mut sha512 = Sha512::new();
     let mut size: u64 = 0;
     let mut buf = [0u8; 65536];
 
@@ -331,15 +369,10 @@ fn compute_hashes(path: &Path) -> Result<(String, String, u64), String> {
             break;
         }
         sha256.update(&buf[..read]);
-        sha512.update(&buf[..read]);
         size += read as u64;
     }
 
-    Ok((
-        hex::encode(sha256.finalize()),
-        hex::encode(sha512.finalize()),
-        size,
-    ))
+    Ok((hex::encode(sha256.finalize()), String::new(), size))
 }
 
 fn build_installer_url(loader_type: &str, mc_version: &str, loader_version: &str) -> Option<String> {
@@ -930,20 +963,17 @@ async fn cmd_generate_manifest(
     );
 
     let mut mods = Vec::with_capacity(total_mods);
-    let mut sha512_list = Vec::with_capacity(total_mods);
     for mod_path in mod_paths {
         let filename = mod_path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| format!("Некорректное имя файла: {}", mod_path.display()))?
             .to_string();
-        let (sha256, sha512, size) = compute_hashes(&mod_path)?;
-        sha512_list.push(sha512.clone());
+        let (sha256, _, size) = compute_hashes(&mod_path)?;
         mods.push(ModEntry {
             rel_path: format!("mods/{}", filename),
             filename,
             sha256,
-            sha512,
             size,
         });
     }
@@ -951,109 +981,35 @@ async fn cmd_generate_manifest(
     let _ = app.emit(
         "gen-progress",
         GenProgress {
-            percent: 45,
-            status: "Проверка модов в Modrinth API...".into(),
-            log: Some("Запрос ссылок CDN к Modrinth API...".into()),
+            percent: 55,
+            status: "Подготовка модов для загрузки в Git-репозиторий...".into(),
+            log: Some("Режим прямой загрузки: автопоиск Modrinth отключён, все моды загружаются в Git.".into()),
         },
     );
 
-    let client = reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let mut modrinth_results: HashMap<String, Value> = HashMap::new();
-    for chunk in sha512_list.chunks(100) {
-        let payload = json!({
-            "hashes": chunk,
-            "algorithm": "sha512"
-        });
-        match client.post(MODRINTH_API).json(&payload).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(map) = resp.json::<HashMap<String, Value>>().await {
-                    modrinth_results.extend(map);
-                }
-            }
-            Ok(resp) => {
-                let _ = app.emit(
-                    "gen-progress",
-                    GenProgress {
-                        percent: 55,
-                        status: "Modrinth API недоступен, используем GitHub Raw...".into(),
-                        log: Some(format!("⚠ Modrinth API вернул статус {}", resp.status())),
-                    },
-                );
-            }
-            Err(err) => {
-                let _ = app.emit(
-                    "gen-progress",
-                    GenProgress {
-                        percent: 55,
-                        status: "Ошибка запроса к Modrinth API...".into(),
-                        log: Some(format!("⚠ Ошибка Modrinth API: {}", err)),
-                    },
-                );
-            }
-        }
-    }
-
     let mut files_list = Vec::new();
-    let mut modrinth_count = 0usize;
+    let modrinth_count = 0usize;
     let mut github_count = 0usize;
 
     for item in mods {
-        let mut modrinth_url: Option<String> = None;
-        if let Some(mod_info) = modrinth_results.get(&item.sha512) {
-            if let Some(files) = mod_info["files"].as_array() {
-                for entry in files {
-                    if entry["hashes"]["sha512"].as_str() == Some(item.sha512.as_str()) {
-                        if let Some(url) = entry["url"].as_str() {
-                            modrinth_url = Some(url.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(url) = modrinth_url {
-            let _ = app.emit(
-                "gen-progress",
-                GenProgress {
-                    percent: 65,
-                    status: "Обработка модов...".into(),
-                    log: Some(format!("✓ [Modrinth CDN] {}", item.filename)),
-                },
-            );
-            files_list.push(ManifestFile {
-                path: item.rel_path,
-                source: "modrinth".into(),
-                url,
-                sha256: item.sha256,
-                size: item.size,
-                extract_to: None,
-            });
-            modrinth_count += 1;
-        } else {
-            let _ = app.emit(
-                "gen-progress",
-                GenProgress {
-                    percent: 65,
-                    status: "Обработка модов...".into(),
-                    log: Some(format!("• [GitHub Raw] {}", item.filename)),
-                },
-            );
-            let url = make_github_raw_url(&config, &item.rel_path);
-            files_list.push(ManifestFile {
-                path: item.rel_path,
-                source: "github".into(),
-                url,
-                sha256: item.sha256,
-                size: item.size,
-                extract_to: None,
-            });
-            github_count += 1;
-        }
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: 65,
+                status: "Обработка модов...".into(),
+                log: Some(format!("• [Git Repo] {}", item.filename)),
+            },
+        );
+        let url = make_github_raw_url(&config, &item.rel_path);
+        files_list.push(ManifestFile {
+            path: item.rel_path,
+            source: "github".into(),
+            url,
+            sha256: item.sha256,
+            size: item.size,
+            extract_to: None,
+        });
+        github_count += 1;
     }
 
     let _ = app.emit(
@@ -1564,6 +1520,48 @@ fn write_sync_state(base_dir: &Path, state: &SyncState) -> Result<(), String> {
         .map_err(|e| format!("Не удалось сохранить состояние синхронизации: {}", e))
 }
 
+fn save_provider_sync_state(
+    base_dir: &Path,
+    prov: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    commit_sha: &str,
+    pack_version: &str,
+) -> Result<(), String> {
+    let prev = read_sync_state(base_dir).filter(|s| {
+        s.repo_owner.eq_ignore_ascii_case(owner)
+            && s.repo_name.eq_ignore_ascii_case(repo)
+            && s.branch == branch
+    });
+    let mut github_sha = prev
+        .as_ref()
+        .and_then(|s| s.sha_for("github").map(|x| x.to_string()));
+    let mut gitlab_sha = prev
+        .as_ref()
+        .and_then(|s| s.sha_for("gitlab").map(|x| x.to_string()));
+
+    if prov.eq_ignore_ascii_case("gitlab") {
+        gitlab_sha = Some(commit_sha.to_string());
+    } else {
+        github_sha = Some(commit_sha.to_string());
+    }
+
+    write_sync_state(
+        base_dir,
+        &SyncState {
+            provider: prov.to_string(),
+            repo_owner: owner.to_string(),
+            repo_name: repo.to_string(),
+            branch: branch.to_string(),
+            commit_sha: commit_sha.to_string(),
+            github_sha,
+            gitlab_sha,
+            pack_version: pack_version.to_string(),
+        },
+    )
+}
+
 struct RemoteHeadInfo {
     commit_sha: String,
     tree_sha: String,
@@ -1822,28 +1820,32 @@ async fn check_remote_sync(
     };
 
     if let Some(local_state) = read_sync_state(&base_dir) {
-        let same_target = local_state.provider.eq_ignore_ascii_case(prov)
-            && local_state.repo_owner.eq_ignore_ascii_case(owner)
+        let same_repo = local_state.repo_owner.eq_ignore_ascii_case(owner)
             && local_state.repo_name.eq_ignore_ascii_case(repo)
             && local_state.branch == branch;
+        let tracked_sha = if same_repo {
+            local_state.sha_for(prov).map(|s| s.to_string())
+        } else {
+            None
+        };
 
-        if same_target && local_state.commit_sha == head.commit_sha {
-            return Ok(SyncCheckResult {
-                status: "up_to_date".into(),
-                local_sha: Some(local_state.commit_sha),
-                remote_sha: Some(head.commit_sha),
-                remote_message: Some(head.message),
-                remote_author: Some(head.author),
-                remote_date: Some(head.date),
-                message: format!("Сборка актуальна и синхронизирована с {}.", label),
-                total_pack_bytes: compute_local_manifest_total_size(&base_dir),
-                needed_bytes: Some(0),
-                free_disk_bytes,
-                enough_disk_space: free_disk_bytes.map(|_| true),
-            });
-        }
+        if let Some(local_sha) = tracked_sha {
+            if local_sha == head.commit_sha {
+                return Ok(SyncCheckResult {
+                    status: "up_to_date".into(),
+                    local_sha: Some(local_sha),
+                    remote_sha: Some(head.commit_sha),
+                    remote_message: Some(head.message),
+                    remote_author: Some(head.author),
+                    remote_date: Some(head.date),
+                    message: format!("Сборка актуальна и синхронизирована с {}.", label),
+                    total_pack_bytes: compute_local_manifest_total_size(&base_dir),
+                    needed_bytes: Some(0),
+                    free_disk_bytes,
+                    enough_disk_space: free_disk_bytes.map(|_| true),
+                });
+            }
 
-        if same_target {
             let sizes = if prov == "gitlab" {
                 match fetch_gitlab_tree_items(&client, owner, repo, &head.commit_sha).await {
                     Ok(items) => {
@@ -1880,7 +1882,7 @@ async fn check_remote_sync(
 
             return Ok(SyncCheckResult {
                 status: "update_required".into(),
-                local_sha: Some(local_state.commit_sha),
+                local_sha: Some(local_sha),
                 remote_sha: Some(head.commit_sha),
                 remote_message: Some(head.message),
                 remote_author: Some(head.author),
@@ -1962,16 +1964,14 @@ async fn check_remote_sync(
                     .and_then(|s| serde_json::from_str::<RepoConfig>(&s).ok())
                     .map(|c| c.pack_version)
                     .unwrap_or_default();
-                let _ = write_sync_state(
+                let _ = save_provider_sync_state(
                     &base_dir,
-                    &SyncState {
-                        provider: prov.to_string(),
-                        repo_owner: owner.to_string(),
-                        repo_name: repo.to_string(),
-                        branch: branch.to_string(),
-                        commit_sha: head.commit_sha.clone(),
-                        pack_version: pack_ver,
-                    },
+                    prov,
+                    owner,
+                    repo,
+                    branch,
+                    &head.commit_sha,
+                    &pack_ver,
                 );
                 return Ok(SyncCheckResult {
                     status: "up_to_date".into(),
@@ -2535,16 +2535,14 @@ async fn cmd_download_modpack_from_github(
         }
     }
 
-    write_sync_state(
+    save_provider_sync_state(
         &base_dir,
-        &SyncState {
-            provider: prov.to_string(),
-            repo_owner: owner.to_string(),
-            repo_name: repo.to_string(),
-            branch: branch.to_string(),
-            commit_sha: head.commit_sha.clone(),
-            pack_version: pack_version.clone(),
-        },
+        prov,
+        owner,
+        repo,
+        branch,
+        &head.commit_sha,
+        &pack_version,
     )?;
 
     let _ = app.emit(
@@ -2807,17 +2805,19 @@ async fn publish_to_gitlab_inner(
     };
 
     if let (Some(head_sha), Some(local_sync)) = (head_sha_opt.as_ref(), read_sync_state(base_dir)) {
-        if local_sync.provider.eq_ignore_ascii_case("gitlab")
-            && local_sync.repo_owner.eq_ignore_ascii_case(owner)
+        if local_sync.repo_owner.eq_ignore_ascii_case(owner)
             && local_sync.repo_name.eq_ignore_ascii_case(repo)
             && local_sync.branch == branch
-            && local_sync.commit_sha != *head_sha
         {
-            return Err(format!(
-                "На GitLab есть более новый коммит ({}), чем локально ({}). Сначала скачайте обновление!",
-                &head_sha[..7.min(head_sha.len())],
-                &local_sync.commit_sha[..7.min(local_sync.commit_sha.len())]
-            ));
+            if let Some(tracked_gl) = local_sync.sha_for("gitlab") {
+                if tracked_gl != head_sha.as_str() {
+                    return Err(format!(
+                        "На GitLab есть более новый коммит ({}), чем локально ({}). Сначала скачайте обновление!",
+                        &head_sha[..7.min(head_sha.len())],
+                        &tracked_gl[..7.min(tracked_gl.len())]
+                    ));
+                }
+            }
         }
     }
 
@@ -2901,16 +2901,14 @@ async fn publish_to_gitlab_inner(
     let repo_url = format!("https://gitlab.com/{}/{}", owner, repo);
     if uploaded_count == 0 && removed_count == 0 {
         if let Some(head_sha) = head_sha_opt {
-            let _ = write_sync_state(
+            let _ = save_provider_sync_state(
                 base_dir,
-                &SyncState {
-                    provider: "gitlab".into(),
-                    repo_owner: owner.to_string(),
-                    repo_name: repo.to_string(),
-                    branch: branch.to_string(),
-                    commit_sha: head_sha.clone(),
-                    pack_version: config.pack_version.clone(),
-                },
+                "gitlab",
+                owner,
+                repo,
+                branch,
+                &head_sha,
+                &config.pack_version,
             );
             let _ = app.emit(
                 "gen-progress",
@@ -2922,11 +2920,13 @@ async fn publish_to_gitlab_inner(
             );
             return Ok(PublishSummary {
                 commit_sha: head_sha,
+                second_commit_sha: None,
                 uploaded_count: 0,
                 reused_count,
                 removed_count: 0,
                 no_changes: true,
                 repo_url,
+                second_repo_url: None,
             });
         }
     }
@@ -3022,16 +3022,14 @@ async fn publish_to_gitlab_inner(
             .to_string();
     }
 
-    let _ = write_sync_state(
+    let _ = save_provider_sync_state(
         base_dir,
-        &SyncState {
-            provider: "gitlab".into(),
-            repo_owner: owner.to_string(),
-            repo_name: repo.to_string(),
-            branch: branch.to_string(),
-            commit_sha: new_commit_sha.clone(),
-            pack_version: config.pack_version.clone(),
-        },
+        "gitlab",
+        owner,
+        repo,
+        branch,
+        &new_commit_sha,
+        &config.pack_version,
     );
 
     let _ = app.emit(
@@ -3051,11 +3049,13 @@ async fn publish_to_gitlab_inner(
 
     Ok(PublishSummary {
         commit_sha: new_commit_sha,
+        second_commit_sha: None,
         uploaded_count,
         reused_count,
         removed_count,
         no_changes: false,
         repo_url,
+        second_repo_url: None,
     })
 }
 
@@ -3063,17 +3063,11 @@ async fn cmd_publish_to_github(
     app: UiHandle,
     dir: String,
     token: String,
+    gitlab_token: Option<String>,
     commit_message: Option<String>,
     provider: Option<String>,
 ) -> Result<PublishSummary, String> {
-    let prov = normalize_provider(provider.as_deref());
-    let label = provider_label(prov);
-    let trimmed_token = token.trim();
-    if trimmed_token.is_empty() {
-        return Err(format!("Укажите {} токен для загрузки обновления на сервер.", label));
-    }
-    save_token_for(prov, trimmed_token)?;
-
+    let target = normalize_publish_target(provider.as_deref());
     let base_dir = PathBuf::from(dir.trim());
     let config_path = base_dir.join(CONFIG_FILE);
     let manifest_path = base_dir.join(MANIFEST_FILE);
@@ -3092,7 +3086,73 @@ async fn cmd_publish_to_github(
     )
     .map_err(|e| format!("Ошибка чтения manifest.json: {}", e))?;
 
-    if prov == "gitlab" {
+    if target == "both" {
+        let gh_tok = token.trim();
+        let gl_tok = gitlab_token.as_deref().unwrap_or("").trim();
+        if gh_tok.is_empty() {
+            return Err("Укажите GitHub токен для одновременной публикации.".into());
+        }
+        if gl_tok.is_empty() {
+            return Err("Укажите GitLab токен для одновременной публикации.".into());
+        }
+        save_token_for("github", gh_tok)?;
+        save_token_for("gitlab", gl_tok)?;
+
+        let gh_res = publish_to_github_inner(
+            &app,
+            &base_dir,
+            &config,
+            &manifest_val,
+            gh_tok,
+            commit_message.clone(),
+        )
+        .await?;
+
+        let gl_res = publish_to_gitlab_inner(
+            &app,
+            &base_dir,
+            &config,
+            &manifest_val,
+            gl_tok,
+            commit_message,
+        )
+        .await?;
+
+        let _ = app.emit(
+            "gen-progress",
+            GenProgress {
+                percent: 100,
+                status: "Опубликовано на GitHub и GitLab!".into(),
+                log: Some(format!(
+                    "🎉 Синхронизировано с GitHub ({}) и GitLab ({})!",
+                    &gh_res.commit_sha[..7.min(gh_res.commit_sha.len())],
+                    &gl_res.commit_sha[..7.min(gl_res.commit_sha.len())]
+                )),
+            },
+        );
+
+        return Ok(PublishSummary {
+            commit_sha: gh_res.commit_sha,
+            second_commit_sha: Some(gl_res.commit_sha),
+            uploaded_count: gh_res.uploaded_count.max(gl_res.uploaded_count),
+            reused_count: gh_res.reused_count.min(gl_res.reused_count),
+            removed_count: gh_res.removed_count.max(gl_res.removed_count),
+            no_changes: gh_res.no_changes && gl_res.no_changes,
+            repo_url: gh_res.repo_url,
+            second_repo_url: Some(gl_res.repo_url),
+        });
+    }
+
+    let trimmed_token = token.trim();
+    if trimmed_token.is_empty() {
+        return Err(format!(
+            "Укажите {} токен для загрузки обновления на сервер.",
+            provider_label(target)
+        ));
+    }
+    save_token_for(target, trimmed_token)?;
+
+    if target == "gitlab" {
         return publish_to_gitlab_inner(
             &app,
             &base_dir,
@@ -3104,6 +3164,25 @@ async fn cmd_publish_to_github(
         .await;
     }
 
+    publish_to_github_inner(
+        &app,
+        &base_dir,
+        &config,
+        &manifest_val,
+        trimmed_token,
+        commit_message,
+    )
+    .await
+}
+
+async fn publish_to_github_inner(
+    app: &UiHandle,
+    base_dir: &Path,
+    config: &RepoConfig,
+    manifest_val: &Value,
+    trimmed_token: &str,
+    commit_message: Option<String>,
+) -> Result<PublishSummary, String> {
     let owner = config.repo_owner.trim();
     let repo = config.repo_name.trim();
     let branch = config.branch.trim();
@@ -3157,18 +3236,20 @@ async fn cmd_publish_to_github(
         .ok_or_else(|| "Не удалось получить SHA последнего коммита ветки.".to_string())?
         .to_string();
 
-    if let Some(local_sync) = read_sync_state(&base_dir) {
-        if local_sync.provider.eq_ignore_ascii_case("github")
-            && local_sync.repo_owner.eq_ignore_ascii_case(owner)
+    if let Some(local_sync) = read_sync_state(base_dir) {
+        if local_sync.repo_owner.eq_ignore_ascii_case(owner)
             && local_sync.repo_name.eq_ignore_ascii_case(repo)
             && local_sync.branch == branch
-            && local_sync.commit_sha != head_sha
         {
-            return Err(format!(
-                "На GitHub есть более новый коммит ({}), чем локально ({}). Сначала скачайте обновление!",
-                &head_sha[..7.min(head_sha.len())],
-                &local_sync.commit_sha[..7.min(local_sync.commit_sha.len())]
-            ));
+            if let Some(tracked_gh) = local_sync.sha_for("github") {
+                if tracked_gh != head_sha.as_str() {
+                    return Err(format!(
+                        "На GitHub есть более новый коммит ({}), чем локально ({}). Сначала скачайте обновление!",
+                        &head_sha[..7.min(head_sha.len())],
+                        &tracked_gh[..7.min(tracked_gh.len())]
+                    ));
+                }
+            }
         }
     }
 
@@ -3311,16 +3392,14 @@ async fn cmd_publish_to_github(
 
     let repo_url = format!("https://github.com/{}/{}", owner, repo);
     if uploaded_count == 0 && removed_count == 0 {
-        let _ = write_sync_state(
-            &base_dir,
-            &SyncState {
-                provider: "github".into(),
-                repo_owner: owner.to_string(),
-                repo_name: repo.to_string(),
-                branch: branch.to_string(),
-                commit_sha: head_sha.clone(),
-                pack_version: config.pack_version.clone(),
-            },
+        let _ = save_provider_sync_state(
+            base_dir,
+            "github",
+            owner,
+            repo,
+            branch,
+            &head_sha,
+            &config.pack_version,
         );
         let _ = app.emit(
             "gen-progress",
@@ -3332,11 +3411,13 @@ async fn cmd_publish_to_github(
         );
         return Ok(PublishSummary {
             commit_sha: head_sha,
+            second_commit_sha: None,
             uploaded_count: 0,
             reused_count,
             removed_count: 0,
             no_changes: true,
             repo_url,
+            second_repo_url: None,
         });
     }
 
@@ -3423,16 +3504,14 @@ async fn cmd_publish_to_github(
         return Err(map_github_http_error(status, &body, owner, repo));
     }
 
-    let _ = write_sync_state(
-        &base_dir,
-        &SyncState {
-            provider: "github".into(),
-            repo_owner: owner.to_string(),
-            repo_name: repo.to_string(),
-            branch: branch.to_string(),
-            commit_sha: new_commit_sha.clone(),
-            pack_version: config.pack_version.clone(),
-        },
+    let _ = save_provider_sync_state(
+        base_dir,
+        "github",
+        owner,
+        repo,
+        branch,
+        &new_commit_sha,
+        &config.pack_version,
     );
 
     let _ = app.emit(
@@ -3452,11 +3531,13 @@ async fn cmd_publish_to_github(
 
     Ok(PublishSummary {
         commit_sha: new_commit_sha,
+        second_commit_sha: None,
         uploaded_count,
         reused_count,
         removed_count,
         no_changes: false,
         repo_url,
+        second_repo_url: None,
     })
 }
 
@@ -3501,6 +3582,7 @@ mod tauri_commands {
         app: AppHandle,
         dir: String,
         token: String,
+        gitlab_token: Option<String>,
         commit_message: Option<String>,
         provider: Option<String>,
     ) -> Result<PublishSummary, String> {
@@ -3508,6 +3590,7 @@ mod tauri_commands {
             UiHandle::from_tauri(app),
             dir,
             token,
+            gitlab_token,
             commit_message,
             provider,
         )
@@ -3609,12 +3692,24 @@ fn dispatch_web_command(
             "publish_to_github" => {
                 let dir = args["dir"].as_str().unwrap_or("").to_string();
                 let token = args["token"].as_str().unwrap_or("").to_string();
+                let gitlab_token = args["gitlabToken"]
+                    .as_str()
+                    .or_else(|| args["gitlab_token"].as_str())
+                    .map(|s| s.to_string());
                 let commit_message = args["commitMessage"]
                     .as_str()
                     .or_else(|| args["commit_message"].as_str())
                     .map(|s| s.to_string());
                 let provider = args["provider"].as_str().map(|s| s.to_string());
-                let res = cmd_publish_to_github(ui, dir, token, commit_message, provider).await?;
+                let res = cmd_publish_to_github(
+                    ui,
+                    dir,
+                    token,
+                    gitlab_token,
+                    commit_message,
+                    provider,
+                )
+                .await?;
                 serde_json::to_value(res).map_err(|e| e.to_string())
             }
             _ => Err(format!("Неизвестная команда: {}", cmd)),

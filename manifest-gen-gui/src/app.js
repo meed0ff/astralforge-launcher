@@ -49,9 +49,14 @@ const repoNameInput = document.getElementById("repo-name");
 const repoBranchInput = document.getElementById("repo-branch");
 
 const providerBtns = Array.from(document.querySelectorAll(".provider-btn"));
+const githubTokenRow = document.getElementById("github-token-row");
+const gitlabTokenRow = document.getElementById("gitlab-token-row");
 const githubTokenInput = document.getElementById("github-token");
-const btnToggleToken = document.getElementById("btn-toggle-token");
+const gitlabTokenInput = document.getElementById("gitlab-token");
+const btnToggleGhToken = document.getElementById("btn-toggle-gh-token");
+const btnToggleGlToken = document.getElementById("btn-toggle-gl-token");
 const btnCheckGithub = document.getElementById("btn-check-github");
+const btnCheckGitlab = document.getElementById("btn-check-gitlab");
 const btnToggleGuide = document.getElementById("btn-toggle-guide");
 const githubGuide = document.getElementById("github-guide");
 const githubStatusEl = document.getElementById("github-status");
@@ -66,7 +71,6 @@ const progressDetails = document.getElementById("progress-details");
 const progressBytes = document.getElementById("progress-bytes");
 const progressSpeed = document.getElementById("progress-speed");
 
-const statModrinth = document.getElementById("stat-modrinth");
 const statGithub = document.getElementById("stat-github");
 const statExtra = document.getElementById("stat-extra");
 const statBundles = document.getElementById("stat-bundles");
@@ -79,44 +83,68 @@ let fetchedVersions = [];
 let versionRequestSeq = 0;
 let isManagementLocked = false;
 let syncCheckSeq = 0;
-let currentProvider = localStorage.getItem("eternum_manager_provider") === "gitlab" ? "gitlab" : "github";
+const savedTarget = localStorage.getItem("eternum_manager_target");
+let currentProvider = (savedTarget === "github" || savedTarget === "gitlab" || savedTarget === "both")
+  ? savedTarget
+  : "both";
 const tokensByProvider = { github: "", gitlab: "" };
 
 function providerLabel(p = currentProvider) {
-  return p === "gitlab" ? "GitLab" : "GitHub";
+  if (p === "gitlab") return "GitLab";
+  if (p === "both") return "GitHub + GitLab";
+  return "GitHub";
+}
+
+function getEffectiveToken(prov) {
+  if (prov === "gitlab") {
+    return (gitlabTokenInput ? gitlabTokenInput.value : tokensByProvider.gitlab || "").trim();
+  }
+  return (githubTokenInput ? githubTokenInput.value : tokensByProvider.github || "").trim();
 }
 
 function setProvider(provider, { sync = false } = {}) {
-  currentProvider = provider === "gitlab" ? "gitlab" : "github";
-  localStorage.setItem("eternum_manager_provider", currentProvider);
+  currentProvider = (provider === "github" || provider === "gitlab" || provider === "both") ? provider : "both";
+  localStorage.setItem("eternum_manager_target", currentProvider);
   const label = providerLabel(currentProvider);
 
   for (const btn of providerBtns) {
     btn.classList.toggle("active", btn.dataset.provider === currentProvider);
   }
-  if (githubTokenInput) {
-    githubTokenInput.placeholder = currentProvider === "gitlab"
-      ? "Вставьте GitLab Token (glpat-...)"
-      : "Вставьте GitHub Token (ghp_... или github_pat_...)";
-    githubTokenInput.value = tokensByProvider[currentProvider] || "";
+  if (githubTokenRow) {
+    githubTokenRow.classList.toggle("hidden", currentProvider === "gitlab");
+  }
+  if (gitlabTokenRow) {
+    gitlabTokenRow.classList.toggle("hidden", currentProvider === "github");
   }
   if (githubStatusEl) {
-    if (tokensByProvider[currentProvider]) {
-      githubStatusEl.textContent = `✓ Сохранённый ${label} токен загружен (можно нажать «Проверить доступ»).`;
+    const hasGh = Boolean(tokensByProvider.github);
+    const hasGl = Boolean(tokensByProvider.gitlab);
+    if (currentProvider === "both") {
+      if (hasGh && hasGl) {
+        githubStatusEl.textContent = "✓ Сохранены токены GitHub и GitLab (готово к одновременной загрузке).";
+        githubStatusEl.className = "hint-text ok";
+      } else {
+        githubStatusEl.textContent = "Для одновременной публикации на GitHub и GitLab укажите оба токена (сохраняются локально).";
+        githubStatusEl.className = "hint-text";
+      }
+    } else if (tokensByProvider[currentProvider]) {
+      githubStatusEl.textContent = `✓ Сохранённый ${label} токен загружен (можно нажать «Проверить»).`;
       githubStatusEl.className = "hint-text ok";
     } else {
-      githubStatusEl.textContent = `Для публикации на ${label} укажите токен (Collaborator/Developer или токен только для этого репозитория).`;
+      githubStatusEl.textContent = `Для публикации на ${label} укажите токен (сохраняется локально).`;
       githubStatusEl.className = "hint-text";
     }
   }
   if (btnGeneratePublish) {
-    btnGeneratePublish.textContent = `🚀 СОБРАТЬ И ЗАГРУЗИТЬ НА ${label.toUpperCase()}`;
+    btnGeneratePublish.textContent = currentProvider === "both"
+      ? "🚀 СОБРАТЬ И ЗАГРУЗИТЬ (GITHUB + GITLAB)"
+      : `🚀 СОБРАТЬ И ЗАГРУЗИТЬ НА ${label.toUpperCase()}`;
   }
   if (btnDownloadRepo) {
-    btnDownloadRepo.title = `Скачать сборку с ${label} в выбранную папку`;
+    btnDownloadRepo.title = `Скачать сборку с ${currentProvider === "gitlab" ? "GitLab" : "GitHub"} в выбранную папку`;
   }
   if (updateLockTitle) {
-    updateLockTitle.textContent = `🔒 На ${label} вышло обновление сборки — требуется скачивание`;
+    updateLockTitle.textContent = `🔒 На ${currentProvider === "gitlab" ? "GitLab" : "GitHub"} вышло обновление сборки — требуется скачивание`;
   }
   if (sync) {
     checkRemoteSync();
@@ -202,9 +230,9 @@ async function checkRemoteSync() {
   const owner = repoOwnerInput.value.trim() || "meed0ff";
   const repo = repoNameInput.value.trim() || "eternum-modpack";
   const branch = repoBranchInput.value.trim() || "main";
-  const provider = currentProvider;
+  const provider = currentProvider === "gitlab" ? "gitlab" : "github";
   const label = providerLabel(provider);
-  const token = (tokensByProvider[provider] ?? githubTokenInput.value).trim();
+  const token = getEffectiveToken(provider);
 
   if (badgeSync) {
     badgeSync.textContent = `${label}: проверка...`;
@@ -292,9 +320,9 @@ async function downloadFromGithub() {
   const owner = repoOwnerInput.value.trim() || "meed0ff";
   const repo = repoNameInput.value.trim() || "eternum-modpack";
   const branch = repoBranchInput.value.trim() || "main";
-  const provider = currentProvider;
+  const provider = currentProvider === "gitlab" ? "gitlab" : "github";
   const label = providerLabel(provider);
-  const token = (tokensByProvider[provider] ?? githubTokenInput.value).trim();
+  const token = getEffectiveToken(provider);
 
   btnDownloadRepo.disabled = true;
   btnPullUpdate.disabled = true;
@@ -617,9 +645,17 @@ document.addEventListener("click", (e) => {
   }
 });
 
-btnToggleToken.addEventListener("click", () => {
-  githubTokenInput.type = githubTokenInput.type === "password" ? "text" : "password";
-});
+if (btnToggleGhToken && githubTokenInput) {
+  btnToggleGhToken.addEventListener("click", () => {
+    githubTokenInput.type = githubTokenInput.type === "password" ? "text" : "password";
+  });
+}
+
+if (btnToggleGlToken && gitlabTokenInput) {
+  btnToggleGlToken.addEventListener("click", () => {
+    gitlabTokenInput.type = gitlabTokenInput.type === "password" ? "text" : "password";
+  });
+}
 
 btnToggleGuide.addEventListener("click", () => {
   githubGuide.classList.toggle("hidden");
@@ -633,27 +669,32 @@ for (const btn of providerBtns) {
 
 if (githubTokenInput) {
   githubTokenInput.addEventListener("input", () => {
-    tokensByProvider[currentProvider] = githubTokenInput.value;
+    tokensByProvider.github = githubTokenInput.value;
   });
 }
 
-btnCheckGithub.addEventListener("click", async () => {
+if (gitlabTokenInput) {
+  gitlabTokenInput.addEventListener("input", () => {
+    tokensByProvider.gitlab = gitlabTokenInput.value;
+  });
+}
+
+async function verifyProviderToken(prov, btnEl) {
   if (!hasTauri) return;
   const owner = repoOwnerInput.value.trim() || "meed0ff";
   const repo = repoNameInput.value.trim() || "eternum-modpack";
-  const provider = currentProvider;
-  const label = providerLabel(provider);
-  const token = githubTokenInput.value.trim();
-  tokensByProvider[provider] = token;
+  const label = providerLabel(prov);
+  const token = getEffectiveToken(prov);
+  tokensByProvider[prov] = token;
 
-  btnCheckGithub.disabled = true;
-  btnCheckGithub.textContent = "Проверка...";
+  btnEl.disabled = true;
+  btnEl.textContent = "...";
   try {
     const info = await window.__TAURI__.core.invoke("check_github_access", {
       owner,
       repo,
       token,
-      provider
+      provider: prov
     });
     const who = info.login ? `@${info.login}` : "токен";
     if (info.can_push) {
@@ -663,33 +704,51 @@ btnCheckGithub.addEventListener("click", async () => {
     } else {
       githubStatusEl.textContent = `⚠ ${who} видит ${owner}/${repo} на ${label}, но прав на запись нет.`;
       githubStatusEl.className = "hint-text warn";
-      showToast("У этого токена нет прав на запись в репозиторий.", "error");
+      showToast(`У этого токена ${label} нет прав на запись в репозиторий.`, "error");
     }
     await checkRemoteSync();
   } catch (err) {
-    githubStatusEl.textContent = `❌ ${err}`;
+    githubStatusEl.textContent = `❌ ${label}: ${err}`;
     githubStatusEl.className = "hint-text";
-    showToast(String(err), "error");
+    showToast(`${label}: ${err}`, "error");
   } finally {
-    btnCheckGithub.disabled = false;
-    btnCheckGithub.textContent = "🔍 Проверить доступ";
+    btnEl.disabled = false;
+    btnEl.textContent = "🔍 Проверить";
   }
-});
+}
+
+if (btnCheckGithub) {
+  btnCheckGithub.addEventListener("click", () => verifyProviderToken("github", btnCheckGithub));
+}
+if (btnCheckGitlab) {
+  btnCheckGitlab.addEventListener("click", () => verifyProviderToken("gitlab", btnCheckGitlab));
+}
 
 async function runGenerateAndOptionallyPublish(andPublish) {
   if (!hasTauri) return;
   const provider = currentProvider;
   const label = providerLabel(provider);
   if (isManagementLocked) {
-    showToast(`Сначала скачайте обновление сборки с ${label}!`, "error");
+    showToast(`Сначала скачайте обновление сборки!`, "error");
     return;
   }
-  const token = githubTokenInput.value.trim();
-  tokensByProvider[provider] = token;
-  if (andPublish && !token) {
-    showToast(`Вставьте ${label} токен в раздел «Платформа и доступ для загрузки».`, "error");
-    githubTokenInput.focus();
-    return;
+
+  const ghToken = getEffectiveToken("github");
+  const glToken = getEffectiveToken("gitlab");
+  tokensByProvider.github = ghToken;
+  tokensByProvider.gitlab = glToken;
+
+  if (andPublish) {
+    if ((provider === "github" || provider === "both") && !ghToken) {
+      showToast("Вставьте GitHub токен в раздел «Платформа и доступ для загрузки».", "error");
+      githubTokenInput?.focus();
+      return;
+    }
+    if ((provider === "gitlab" || provider === "both") && !glToken) {
+      showToast("Вставьте GitLab токен в раздел «Платформа и доступ для загрузки».", "error");
+      gitlabTokenInput?.focus();
+      return;
+    }
   }
 
   const dir = modpackDirInput.value.trim();
@@ -717,15 +776,15 @@ async function runGenerateAndOptionallyPublish(andPublish) {
 
   try {
     const res = await window.__TAURI__.core.invoke("generate_manifest", { dir, config });
-    statModrinth.textContent = res.modrinth_count;
-    statGithub.textContent = res.github_count;
-    statExtra.textContent = res.extra_count;
-    statBundles.textContent = res.bundle_count;
+    if (statGithub) statGithub.textContent = res.github_count;
+    if (statExtra) statExtra.textContent = res.extra_count;
+    if (statBundles) statBundles.textContent = res.bundle_count;
 
     if (andPublish) {
       const pub = await window.__TAURI__.core.invoke("publish_to_github", {
         dir,
-        token,
+        token: provider === "gitlab" ? glToken : ghToken,
+        gitlabToken: provider === "both" ? glToken : null,
         commitMessage: null,
         provider
       });
@@ -803,6 +862,8 @@ async function initApp() {
     ]);
     tokensByProvider.github = savedGhToken || "";
     tokensByProvider.gitlab = savedGlToken || "";
+    if (githubTokenInput) githubTokenInput.value = tokensByProvider.github;
+    if (gitlabTokenInput) gitlabTokenInput.value = tokensByProvider.gitlab;
     setProvider(currentProvider, { sync: false });
     const initialDir = await window.__TAURI__.core.invoke("detect_initial_dir");
     await loadFolderOverview(initialDir);
