@@ -395,7 +395,7 @@ fn detect_initial_dir() -> String {
             return cwd.to_string_lossy().to_string();
         }
     }
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = ui_bridge::user_home_dir() {
         let candidate = home.join("eternum-modpack");
         if candidate.is_dir() {
             return candidate.to_string_lossy().to_string();
@@ -1229,7 +1229,7 @@ fn token_file_path(provider: &str) -> Option<PathBuf> {
     } else {
         "github_token.txt"
     };
-    dirs::config_dir().map(|d| d.join("EternumManifestGen").join(filename))
+    ui_bridge::user_config_dir().map(|d| d.join("EternumManifestGen").join(filename))
 }
 
 fn load_token_for(provider: &str) -> String {

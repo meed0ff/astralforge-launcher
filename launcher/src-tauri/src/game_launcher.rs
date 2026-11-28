@@ -70,7 +70,7 @@ pub const MOJANG_VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
 pub fn get_game_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::ui_bridge::user_home_dir() {
         home.join(".eternum")
     } else {
         PathBuf::from(".eternum")
@@ -620,14 +620,14 @@ fn collect_tagged_java_candidates(game_dir: &Path) -> Vec<(PathBuf, &'static str
         search_roots.push(PathBuf::from("/usr/java"));
         search_roots.push(PathBuf::from("/opt/java"));
         search_roots.push(PathBuf::from("/opt"));
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::ui_bridge::user_home_dir() {
             search_roots.push(home.join(".jdks"));
             search_roots.push(home.join(".sdkman/candidates/java"));
             search_roots.push(home.join(".local/share/PrismLauncher/java"));
         }
     } else if cfg!(target_os = "macos") {
         search_roots.push(PathBuf::from("/Library/Java/JavaVirtualMachines"));
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::ui_bridge::user_home_dir() {
             search_roots.push(home.join("Library/Java/JavaVirtualMachines"));
             search_roots.push(home.join(".jdks"));
         }
@@ -651,17 +651,17 @@ fn collect_tagged_java_candidates(game_dir: &Path) -> Vec<(PathBuf, &'static str
                 search_roots.push(b.join(sub));
             }
         }
-        if let Some(local_app_data) = dirs::data_local_dir() {
+        if let Some(local_app_data) = crate::ui_bridge::user_data_local_dir() {
             let programs = local_app_data.join("Programs");
             for sub in ["Eclipse Adoptium", "Java", "Microsoft", "Zulu"] {
                 search_roots.push(programs.join(sub));
             }
         }
-        if let Some(roaming_app_data) = dirs::config_dir() {
+        if let Some(roaming_app_data) = crate::ui_bridge::user_config_dir() {
             search_roots.push(roaming_app_data.join("PrismLauncher").join("java"));
             search_roots.push(roaming_app_data.join("ModrinthApp").join("meta").join("java_versions"));
         }
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::ui_bridge::user_home_dir() {
             search_roots.push(home.join(".jdks"));
             search_roots.push(home.join(".gradle").join("jdks"));
         }

@@ -40,7 +40,7 @@ pub fn register_uri_scheme_linux() {
     let Ok(exe_path) = std::env::current_exe() else {
         return;
     };
-    let Some(data_dir) = dirs::data_local_dir() else {
+    let Some(data_dir) = crate::ui_bridge::user_data_local_dir() else {
         return;
     };
     let apps_dir = data_dir.join("applications");

@@ -1,6 +1,83 @@
 use serde::Serialize;
 use serde_json::json;
+use std::path::PathBuf;
 use tokio::sync::broadcast;
+
+#[allow(dead_code)]
+pub fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        win_csidl_dir(0x0028) // CSIDL_PROFILE
+            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+#[allow(dead_code)]
+pub fn user_config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        win_csidl_dir(0x001a) // CSIDL_APPDATA
+            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        user_home_dir().map(|h| h.join("Library").join("Application Support"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|h| h.join(".config")))
+    }
+}
+
+#[allow(dead_code)]
+pub fn user_data_local_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        win_csidl_dir(0x001c) // CSIDL_LOCAL_APPDATA
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        user_home_dir().map(|h| h.join("Library").join("Application Support"))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|h| h.join(".local").join("share")))
+    }
+}
+
+#[cfg(windows)]
+fn win_csidl_dir(csidl: i32) -> Option<PathBuf> {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHGetFolderPathW(
+            hwnd_owner: isize,
+            n_folder: i32,
+            h_token: isize,
+            dw_flags: u32,
+            psz_path: *mut u16,
+        ) -> i32;
+    }
+    let mut buf = [0u16; 260];
+    let hr = unsafe { SHGetFolderPathW(0, csidl, 0, 0, buf.as_mut_ptr()) };
+    if hr == 0 {
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        if len > 0 {
+            return Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])));
+        }
+    }
+    None
+}
 
 #[derive(Clone)]
 pub enum UiHandle {
