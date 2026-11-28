@@ -1,13 +1,14 @@
 use crate::downloader::{download_file, download_file_tracked, DownloadTracker, ProgressPayload};
 use crate::manifest::Manifest;
+use crate::ui_bridge::UiHandle;
 use futures_util::stream::{self, StreamExt};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
@@ -136,7 +137,7 @@ fn rules_allow(rules: Option<&Vec<Value>>) -> bool {
 
 /// Скачивает ванильный version.json, клиентский jar, библиотеки и ассеты для Minecraft
 async fn ensure_vanilla_installed(
-    app: &AppHandle,
+    app: &UiHandle,
     client: &reqwest::Client,
     game_dir: &Path,
     mc_version: &str,
@@ -307,22 +308,66 @@ async fn ensure_vanilla_installed(
     Ok(version_json)
 }
 
-fn parse_java_major_version(version_output: &str) -> Option<u32> {
-    // Examples: openjdk version "21.0.5" 2024-10-15 | java version "1.8.0_402" | openjdk version "21"
+#[derive(Debug, Clone, Serialize)]
+pub struct JavaInstallationInfo {
+    pub path: String,
+    pub version: String,
+    pub major: u32,
+    pub arch: String,
+    pub vendor: String,
+    pub source: String,
+    pub compatible: bool,
+    pub recommended: bool,
+    pub note: String,
+}
+
+fn parse_java_version_details(version_output: &str) -> Option<(u32, String, String)> {
     let start = version_output.find('"')? + 1;
     let rest = &version_output[start..];
     let end = rest.find('"')?;
-    let ver_str = &rest[..end];
+    let ver_str = rest[..end].trim().to_string();
     let mut parts = ver_str.split(['.', '_', '-']);
     let first: u32 = parts.next()?.parse().ok()?;
-    if first == 1 {
-        parts.next()?.parse().ok()
+    let major = if first == 1 {
+        parts.next()?.parse().ok()?
     } else {
-        Some(first)
-    }
+        first
+    };
+    let lower = version_output.to_lowercase();
+    let arch = if lower.contains("aarch64") || lower.contains("arm64") {
+        "aarch64".to_string()
+    } else if lower.contains("64-bit") || lower.contains("amd64") || lower.contains("x86_64") {
+        "64-bit".to_string()
+    } else {
+        "32-bit".to_string()
+    };
+    Some((major, ver_str, arch))
 }
 
-async fn check_java_version(java_bin: &Path) -> Option<u32> {
+fn read_java_release_metadata(java_bin: &Path) -> (Option<String>, Option<String>) {
+    let Some(home) = java_bin.parent().and_then(|p| p.parent()) else {
+        return (None, None);
+    };
+    let release_path = home.join("release");
+    let Ok(text) = std::fs::read_to_string(release_path) else {
+        return (None, None);
+    };
+    let mut implementor = None;
+    let mut os_arch = None;
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            let clean = v.trim().trim_matches('"').to_string();
+            if k.trim() == "IMPLEMENTOR" && !clean.is_empty() {
+                implementor = Some(clean);
+            } else if k.trim() == "OS_ARCH" && !clean.is_empty() {
+                os_arch = Some(clean);
+            }
+        }
+    }
+    (implementor, os_arch)
+}
+
+async fn check_java_version_detail(java_bin: &Path) -> Option<(u32, String, String, String)> {
     let mut cmd = Command::new(java_bin);
     cmd.arg("-version");
     apply_no_window(&mut cmd);
@@ -335,51 +380,290 @@ async fn check_java_version(java_bin: &Path) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    parse_java_major_version(&combined)
+    let (major, version_str, arch_hint) = parse_java_version_details(&combined)?;
+    let (implementor, os_arch) = read_java_release_metadata(java_bin);
+
+    let vendor = implementor.unwrap_or_else(|| {
+        let lower = combined.to_lowercase();
+        if lower.contains("temurin") || lower.contains("adoptium") {
+            "Eclipse Adoptium".into()
+        } else if lower.contains("microsoft") {
+            "Microsoft".into()
+        } else if lower.contains("zulu") || lower.contains("azul") {
+            "Azul Zulu".into()
+        } else if lower.contains("corretto") {
+            "Amazon Corretto".into()
+        } else if lower.contains("liberica") {
+            "BellSoft Liberica".into()
+        } else if lower.contains("openjdk") {
+            "OpenJDK".into()
+        } else {
+            "Oracle / System".into()
+        }
+    });
+    let arch = os_arch.unwrap_or(arch_hint);
+    Some((major, version_str, arch, vendor))
 }
 
-fn collect_java_candidates(game_dir: &Path, required_major: u32) -> Vec<PathBuf> {
-    let java_exe = if cfg!(windows) { "java.exe" } else { "java" };
-    let mut candidates = Vec::new();
+#[cfg(windows)]
+fn collect_windows_registry_java_homes() -> Vec<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
 
-    // 1. Управляемая Java лаунчера (~/.astralforge/runtime/java-{major})
-    candidates.push(
-        game_dir
-            .join("runtime")
-            .join(format!("java-{}", required_major))
-            .join("bin")
-            .join(java_exe),
-    );
+    const HKEY_LOCAL_MACHINE: isize = -2147483646;
+    const KEY_READ: u32 = 0x20019;
+    const REG_SZ: u32 = 1;
+    const REG_EXPAND_SZ: u32 = 2;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegOpenKeyExW(
+            hkey: isize,
+            lp_sub_key: *const u16,
+            ul_options: u32,
+            sam_desired: u32,
+            phk_result: *mut isize,
+        ) -> i32;
+        fn RegEnumKeyExW(
+            hkey: isize,
+            dw_index: u32,
+            lp_name: *mut u16,
+            lpcch_name: *mut u32,
+            lp_reserved: *mut u32,
+            lp_class: *mut u16,
+            lpcch_class: *mut u32,
+            lpft_last_write_time: *mut u8,
+        ) -> i32;
+        fn RegQueryValueExW(
+            hkey: isize,
+            lp_value_name: *const u16,
+            lp_reserved: *mut u32,
+            lp_type: *mut u32,
+            lp_data: *mut u8,
+            lpcb_data: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(hkey: isize) -> i32;
+    }
+
+    fn read_sz_value(hkey: isize, name: &str) -> Option<String> {
+        let name_w: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+        let mut reg_type: u32 = 0;
+        let mut size: u32 = 0;
+        unsafe {
+            if RegQueryValueExW(
+                hkey,
+                name_w.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                std::ptr::null_mut(),
+                &mut size,
+            ) != 0
+                || size == 0
+                || (reg_type != REG_SZ && reg_type != REG_EXPAND_SZ)
+            {
+                return None;
+            }
+            let mut buf = vec![0u16; (size as usize + 1) / 2];
+            if RegQueryValueExW(
+                hkey,
+                name_w.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr() as *mut u8,
+                &mut size,
+            ) != 0
+            {
+                return None;
+            }
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            Some(String::from_utf16_lossy(&buf[..len]))
+        }
+    }
+
+    fn walk_key(hive: isize, subkey: &str, depth: u8, out: &mut Vec<PathBuf>) {
+        if depth > 4 {
+            return;
+        }
+        let sub_w: Vec<u16> = OsStr::new(subkey).encode_wide().chain(Some(0)).collect();
+        let mut hkey: isize = 0;
+        unsafe {
+            if RegOpenKeyExW(hive, sub_w.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+                return;
+            }
+        }
+        for val_name in ["JavaHome", "Path", "InstallationPath"] {
+            if let Some(val) = read_sz_value(hkey, val_name) {
+                let p = PathBuf::from(val.trim());
+                if p.exists() {
+                    out.push(p);
+                }
+            }
+        }
+        let mut idx = 0u32;
+        loop {
+            let mut name_buf = [0u16; 256];
+            let mut name_len = name_buf.len() as u32;
+            let rc = unsafe {
+                RegEnumKeyExW(
+                    hkey,
+                    idx,
+                    name_buf.as_mut_ptr(),
+                    &mut name_len,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc != 0 {
+                break;
+            }
+            idx += 1;
+            let child = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            let next_key = format!("{}\\{}", subkey, child);
+            walk_key(hive, &next_key, depth + 1, out);
+        }
+        unsafe {
+            RegCloseKey(hkey);
+        }
+    }
+
+    const ROOTS: &[&str] = &[
+        r"SOFTWARE\JavaSoft\JDK",
+        r"SOFTWARE\JavaSoft\Java Runtime Environment",
+        r"SOFTWARE\Eclipse Adoptium\JDK",
+        r"SOFTWARE\Eclipse Foundation\JDK",
+        r"SOFTWARE\AdoptOpenJDK\JDK",
+        r"SOFTWARE\Azul Systems\Zulu",
+        r"SOFTWARE\BellSoft\Liberica",
+        r"SOFTWARE\Microsoft\JDK",
+        r"SOFTWARE\Amazon\Corretto",
+        r"SOFTWARE\WOW6432Node\JavaSoft\JDK",
+        r"SOFTWARE\WOW6432Node\JavaSoft\Java Runtime Environment",
+    ];
+
+    let mut homes = Vec::new();
+    for root in ROOTS {
+        walk_key(HKEY_LOCAL_MACHINE, root, 0, &mut homes);
+    }
+    homes
+}
+
+fn push_java_home_candidates(home: &Path, source: &'static str, out: &mut Vec<(PathBuf, &'static str)>) {
+    let java_exe = if cfg!(windows) { "java.exe" } else { "java" };
+    let direct = home.join("bin").join(java_exe);
+    if direct.is_file() {
+        out.push((direct, source));
+    }
+    let mac_home = home.join("Contents/Home/bin").join(java_exe);
+    if mac_home.is_file() {
+        out.push((mac_home, source));
+    }
+    // Некоторые паки (например MSI / Adoptium / Hotspot) имеют подпапки JRE/JDK
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() {
+                let sub_bin = sub.join("bin").join(java_exe);
+                if sub_bin.is_file() {
+                    out.push((sub_bin, source));
+                }
+            }
+        }
+    }
+}
+
+fn collect_tagged_java_candidates(game_dir: &Path) -> Vec<(PathBuf, &'static str)> {
+    let java_exe = if cfg!(windows) { "java.exe" } else { "java" };
+    let mut raw: Vec<(PathBuf, &'static str)> = Vec::new();
+
+    // 1. Управляемая Java лаунчера (~/.eternum/runtime/*)
+    let runtime_dir = game_dir.join("runtime");
+    if let Ok(entries) = std::fs::read_dir(&runtime_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                push_java_home_candidates(&p, "managed", &mut raw);
+            }
+        }
+    }
 
     // 2. JAVA_HOME
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
-        candidates.push(PathBuf::from(java_home).join("bin").join(java_exe));
+        let p = PathBuf::from(java_home.trim());
+        push_java_home_candidates(&p, "env", &mut raw);
     }
 
-    // 3. Системная java в PATH
-    candidates.push(PathBuf::from(java_exe));
+    // 3. Все бинарники из PATH
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(java_exe);
+            if candidate.is_file() {
+                raw.push((candidate, "env"));
+            }
+        }
+    }
 
-    // 4. Стандартные директории JVM на Linux / macOS / Windows
+    // 4. Реестр Windows (Prism-стиль)
+    #[cfg(windows)]
+    {
+        for home in collect_windows_registry_java_homes() {
+            push_java_home_candidates(&home, "registry", &mut raw);
+        }
+    }
+
+    // 5. Стандартные директории JVM на Linux / macOS / Windows
     let mut search_roots = Vec::new();
     if cfg!(target_os = "linux") {
         search_roots.push(PathBuf::from("/usr/lib/jvm"));
         search_roots.push(PathBuf::from("/usr/lib64/jvm"));
+        search_roots.push(PathBuf::from("/usr/java"));
         search_roots.push(PathBuf::from("/opt/java"));
+        search_roots.push(PathBuf::from("/opt"));
         if let Some(home) = dirs::home_dir() {
             search_roots.push(home.join(".jdks"));
             search_roots.push(home.join(".sdkman/candidates/java"));
+            search_roots.push(home.join(".local/share/PrismLauncher/java"));
         }
     } else if cfg!(target_os = "macos") {
         search_roots.push(PathBuf::from("/Library/Java/JavaVirtualMachines"));
+        if let Some(home) = dirs::home_dir() {
+            search_roots.push(home.join("Library/Java/JavaVirtualMachines"));
+            search_roots.push(home.join(".jdks"));
+        }
     } else if cfg!(windows) {
-        search_roots.push(PathBuf::from("C:\\Program Files\\Java"));
-        search_roots.push(PathBuf::from("C:\\Program Files\\Eclipse Adoptium"));
-        search_roots.push(PathBuf::from("C:\\Program Files\\Microsoft"));
+        for base in [
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+        ] {
+            let b = PathBuf::from(base);
+            for sub in [
+                "Java",
+                "Eclipse Adoptium",
+                "AdoptOpenJDK",
+                "Microsoft",
+                "Zulu",
+                "BellSoft",
+                "Amazon Corretto",
+                "Semeru",
+                "SapMachine",
+            ] {
+                search_roots.push(b.join(sub));
+            }
+        }
         if let Some(local_app_data) = dirs::data_local_dir() {
             let programs = local_app_data.join("Programs");
-            search_roots.push(programs.join("Eclipse Adoptium"));
-            search_roots.push(programs.join("Java"));
-            search_roots.push(programs.join("Microsoft"));
+            for sub in ["Eclipse Adoptium", "Java", "Microsoft", "Zulu"] {
+                search_roots.push(programs.join(sub));
+            }
+        }
+        if let Some(roaming_app_data) = dirs::config_dir() {
+            search_roots.push(roaming_app_data.join("PrismLauncher").join("java"));
+            search_roots.push(roaming_app_data.join("ModrinthApp").join("meta").join("java_versions"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            search_roots.push(home.join(".jdks"));
+            search_roots.push(home.join(".gradle").join("jdks"));
         }
     }
 
@@ -388,87 +672,131 @@ fn collect_java_candidates(game_dir: &Path, required_major: u32) -> Vec<PathBuf>
             for entry in entries.flatten() {
                 let p = entry.path();
                 if p.is_dir() {
-                    candidates.push(p.join("bin").join(java_exe));
-                    candidates.push(p.join("Contents/Home/bin").join(java_exe));
+                    push_java_home_candidates(&p, "system", &mut raw);
                 }
             }
         }
     }
 
-    candidates
+    // Дедупликация по каноническому пути
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for (p, src) in raw {
+        let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        let key = if cfg!(windows) {
+            canonical.to_string_lossy().to_lowercase()
+        } else {
+            canonical.to_string_lossy().to_string()
+        };
+        if seen.insert(key) {
+            // Убираем \\?\ префикс на Windows для красивого отображения в UI
+            let display_path = {
+                let s = canonical.to_string_lossy().to_string();
+                if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                    PathBuf::from(stripped)
+                } else {
+                    canonical
+                }
+            };
+            unique.push((display_path, src));
+        }
+    }
+
+    unique
 }
 
-/// Автоматически находит подходящую Java (>= required_major) или скачивает Eclipse Temurin
-pub async fn resolve_or_install_java(
-    app: &AppHandle,
+pub fn is_java_compatible(java_major: u32, required_major: u32) -> (bool, String) {
+    if java_major == required_major {
+        (true, format!("✓ Подходит (Java {})", required_major))
+    } else if java_major < required_major {
+        (false, format!("✕ Устарела (требуется Java {})", required_major))
+    } else {
+        (false, format!("✕ Слишком новая (для стабильной работы нужна Java {})", required_major))
+    }
+}
+
+pub async fn scan_java_installations(
+    game_dir: &Path,
+    required_major: Option<u32>,
+) -> Vec<JavaInstallationInfo> {
+    let req = required_major.unwrap_or(21);
+    let candidates: Vec<(PathBuf, String)> = collect_tagged_java_candidates(game_dir)
+        .into_iter()
+        .map(|(p, s)| (p, s.to_string()))
+        .collect();
+
+    let probed: Vec<Option<JavaInstallationInfo>> = stream::iter(candidates)
+        .map(|(path, source)| async move {
+            let (major, version, arch, vendor) = check_java_version_detail(&path).await?;
+            let (compatible, note) = is_java_compatible(major, req);
+            let recommended = compatible && source == "managed";
+            Some(JavaInstallationInfo {
+                path: path.to_string_lossy().to_string(),
+                version,
+                major,
+                arch,
+                vendor,
+                source,
+                compatible,
+                recommended,
+                note,
+            })
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    let mut list: Vec<JavaInstallationInfo> = probed.into_iter().flatten().collect();
+    list.sort_by(|a, b| {
+        b.compatible
+            .cmp(&a.compatible)
+            .then_with(|| b.recommended.cmp(&a.recommended))
+            .then_with(|| (a.source != "managed").cmp(&(b.source != "managed")))
+            .then_with(|| b.major.cmp(&a.major))
+            .then_with(|| b.version.cmp(&a.version))
+    });
+    list
+}
+
+#[cfg(windows)]
+fn extract_zip_strip_root(archive_path: &Path, target_dir: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| format!("Не удалось открыть архив Java: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Повреждённый архив Java: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let Some(rel_enclosed) = entry.enclosed_name() else {
+            continue;
+        };
+        let mut comps = rel_enclosed.components();
+        // Стрипаем корневую папку внутри архива Temurin (jdk-21.0.x+y/)
+        let _root = comps.next();
+        let stripped: PathBuf = comps.collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        let dest = target_dir.join(&stripped);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn install_temurin_java(
+    app: &UiHandle,
     client: &reqwest::Client,
     game_dir: &Path,
-    configured_java: &str,
     required_major: u32,
 ) -> Result<String, String> {
-    let trimmed = configured_java.trim();
-    if !trimmed.is_empty() && trimmed != "java" && trimmed != "auto" {
-        let custom_path = PathBuf::from(trimmed);
-        if let Some(ver) = check_java_version(&custom_path).await {
-            let _ = app.emit(
-                "download-progress",
-                ProgressPayload {
-                    percent: 85,
-                    status: format!("Используется указанная Java {}...", ver),
-                    log: Some(format!("Найдена пользовательская Java {} ({})", ver, trimmed)),
-                },
-            );
-            return Ok(trimmed.to_string());
-        }
-        return Err(format!(
-            "Указанный путь к Java не работает: {}. Укажите верный путь или оставьте 'java' для автопоиска.",
-            trimmed
-        ));
-    }
-
-    let _ = app.emit(
-        "download-progress",
-        ProgressPayload {
-            percent: 84,
-            status: format!("Поиск Java {}+ в системе...", required_major),
-            log: Some(format!("Требуемая версия Java для сборки: {}+", required_major)),
-        },
-    );
-
-    let mut fallback_candidate: Option<(u32, String)> = None;
-    for candidate in collect_java_candidates(game_dir, required_major) {
-        if let Some(ver) = check_java_version(&candidate).await {
-            let path_str = candidate.to_string_lossy().to_string();
-            if ver == required_major {
-                let _ = app.emit(
-                    "download-progress",
-                    ProgressPayload {
-                        percent: 86,
-                        status: format!("Найдена Java {}!", ver),
-                        log: Some(format!("Найдена подходящая Java {}: {}", ver, path_str)),
-                    },
-                );
-                return Ok(path_str);
-            }
-            if ver > required_major && fallback_candidate.is_none() {
-                fallback_candidate = Some((ver, path_str));
-            }
-        }
-    }
-
-    if let Some((ver, path_str)) = fallback_candidate {
-        let _ = app.emit(
-            "download-progress",
-            ProgressPayload {
-                percent: 86,
-                status: format!("Найдена Java {}!", ver),
-                log: Some(format!("Найдена совместимая Java {}: {}", ver, path_str)),
-            },
-        );
-        return Ok(path_str);
-    }
-
-    // Если подходящей Java нет — скачиваем Eclipse Temurin с Adoptium
     let os = if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -515,27 +843,35 @@ pub async fn resolve_or_install_java(
         },
     );
 
-    let mut extract_cmd = Command::new("tar");
-    if cfg!(windows) {
-        extract_cmd.arg("-xf");
-    } else {
-        extract_cmd.arg("-xzf");
+    #[cfg(windows)]
+    {
+        let arc = archive_path.clone();
+        let dst = target_java_dir.clone();
+        let res = tokio::task::spawn_blocking(move || extract_zip_strip_root(&arc, &dst))
+            .await
+            .map_err(|e| format!("Ошибка распаковки Java: {}", e))?;
+        let _ = std::fs::remove_file(&archive_path);
+        res?;
     }
-    extract_cmd
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(&target_java_dir)
-        .arg("--strip-components=1");
-    apply_no_window(&mut extract_cmd);
-    let extract_status = extract_cmd
-        .status()
-        .await
-        .map_err(|e| format!("Не удалось распаковать Java: {}", e))?;
 
-    let _ = std::fs::remove_file(&archive_path);
-
-    if !extract_status.success() {
-        return Err("Ошибка при распаковке архива Java.".into());
+    #[cfg(not(windows))]
+    {
+        let mut extract_cmd = Command::new("tar");
+        extract_cmd
+            .arg("-xzf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(&target_java_dir)
+            .arg("--strip-components=1");
+        apply_no_window(&mut extract_cmd);
+        let extract_status = extract_cmd
+            .status()
+            .await
+            .map_err(|e| format!("Не удалось распаковать Java: {}", e))?;
+        let _ = std::fs::remove_file(&archive_path);
+        if !extract_status.success() {
+            return Err("Ошибка при распаковке архива Java.".into());
+        }
     }
 
     let java_exe = if cfg!(windows) { "java.exe" } else { "java" };
@@ -550,6 +886,88 @@ pub async fn resolve_or_install_java(
     Ok(installed_java.to_string_lossy().to_string())
 }
 
+/// Строго находит точную Java == required_major или скачивает Eclipse Temurin
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_or_install_java(
+    app: &UiHandle,
+    client: &reqwest::Client,
+    game_dir: &Path,
+    configured_java: &str,
+    required_major: u32,
+    strict_java_check: bool,
+    mc_version: &str,
+    loader_type: &str,
+) -> Result<String, String> {
+    let trimmed = configured_java.trim();
+    if !trimmed.is_empty() && trimmed != "java" && trimmed != "auto" {
+        let custom_path = PathBuf::from(trimmed);
+        let Some((ver, full_ver, _arch, vendor)) = check_java_version_detail(&custom_path).await else {
+            return Err(format!(
+                "Указанный путь к Java не работает: {}. Укажите верный путь или выберите Java в окне «Автопоиск Java».",
+                trimmed
+            ));
+        };
+
+        let (compatible, _) = is_java_compatible(ver, required_major);
+        if !compatible {
+            if strict_java_check {
+                return Err(format!(
+                    "Несовместимая версия Java! Выбрана Java {} ({}, {}), но для Minecraft {} ({}) требуется Java {}. Выберите Java {} в окне «Автопоиск Java» или переключитесь на 'auto'.",
+                    ver, full_ver, vendor, mc_version, loader_type, required_major, required_major
+                ));
+            }
+            let _ = app.emit(
+                "download-progress",
+                ProgressPayload {
+                    percent: 85,
+                    status: format!("⚠ Принудительный запуск с Java {} (требуется {})...", full_ver, required_major),
+                    log: Some(format!(
+                        "⚠ Внимание: выбрана Java {} при рекомендуемой Java {} ({})",
+                        full_ver, required_major, trimmed
+                    )),
+                },
+            );
+        } else {
+            let _ = app.emit(
+                "download-progress",
+                ProgressPayload {
+                    percent: 85,
+                    status: format!("Используется Java {} ({})...", full_ver, vendor),
+                    log: Some(format!("✓ Java {} ({}) подтверждена: {}", full_ver, vendor, trimmed)),
+                },
+            );
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    let _ = app.emit(
+        "download-progress",
+        ProgressPayload {
+            percent: 84,
+            status: format!("Поиск Java {} для Minecraft {}...", required_major, mc_version),
+            log: Some(format!(
+                "Требуемая версия Java для {} ({}): Java {}",
+                mc_version, loader_type, required_major
+            )),
+        },
+    );
+
+    let installed = scan_java_installations(game_dir, Some(required_major)).await;
+    if let Some(exact) = installed.into_iter().find(|j| j.major == required_major) {
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                percent: 86,
+                status: format!("Найдена Java {} ({})!", exact.version, exact.vendor),
+                log: Some(format!("✓ Найдена совместимая Java {} ({}): {}", exact.version, exact.vendor, exact.path)),
+            },
+        );
+        return Ok(exact.path);
+    }
+
+    install_temurin_java(app, client, game_dir, required_major).await
+}
+
 fn loader_profile_name(loader_type: &str, mc_version: &str, loader_version: &str) -> String {
     if loader_type.eq_ignore_ascii_case("fabric") {
         format!("fabric-loader-{}-{}", loader_version, mc_version)
@@ -560,7 +978,7 @@ fn loader_profile_name(loader_type: &str, mc_version: &str, loader_version: &str
 
 /// Устанавливает Fabric Loader (профиль и библиотеки) и возвращает путь к подходящей Java
 async fn ensure_fabric_installed(
-    app: &AppHandle,
+    app: &UiHandle,
     client: &reqwest::Client,
     game_dir: &Path,
     mc_version: &str,
@@ -660,10 +1078,11 @@ async fn ensure_fabric_installed(
 
 /// Устанавливает выбранный модлоадер (Fabric или NeoForge) и возвращает путь к подходящей Java
 pub async fn ensure_loader_installed(
-    app: &AppHandle,
+    app: &UiHandle,
     client: &reqwest::Client,
     game_dir: &Path,
     java_path: &str,
+    strict_java_check: bool,
     manifest: &Manifest,
 ) -> Result<String, String> {
     // 1. Убеждаемся, что ванильный клиент, библиотеки и ассеты готовы
@@ -673,8 +1092,17 @@ pub async fn ensure_loader_installed(
         .unwrap_or(21) as u32;
 
     // 2. Автопоиск или скачивание нужной версии Java
-    let resolved_java =
-        resolve_or_install_java(app, client, game_dir, java_path, required_java).await?;
+    let resolved_java = resolve_or_install_java(
+        app,
+        client,
+        game_dir,
+        java_path,
+        required_java,
+        strict_java_check,
+        &manifest.minecraft.version,
+        &manifest.loader.loader_type,
+    )
+    .await?;
 
     let loader_type = manifest.loader.loader_type.to_lowercase();
     if loader_type == "fabric" {
@@ -959,10 +1387,14 @@ fn collect_arguments(args_arr: Option<&Vec<Value>>, vars: &HashMap<&str, String>
     result
 }
 
+fn should_include_vanilla_client_jar(loader_type: &str) -> bool {
+    !loader_type.eq_ignore_ascii_case("neoforge") && !loader_type.eq_ignore_ascii_case("forge")
+}
+
 /// Запуск процесса Minecraft (Fabric / NeoForge)
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_minecraft(
-    app: &AppHandle,
+    app: &UiHandle,
     running_state: RunningGameState,
     game_dir: &Path,
     java_path: &str,
@@ -1014,12 +1446,14 @@ pub async fn launch_minecraft(
     collect_libraries_from_json(&loader_json, &libraries_dir, &mut seen_jars, &mut classpath_entries);
     collect_libraries_from_json(&mc_json, &libraries_dir, &mut seen_jars, &mut classpath_entries);
 
-    let client_jar = game_dir
-        .join("versions")
-        .join(mc_version)
-        .join(format!("{}.jar", mc_version));
-    if client_jar.exists() && seen_jars.insert(client_jar.clone()) {
-        classpath_entries.push(client_jar);
+    if should_include_vanilla_client_jar(loader_type) {
+        let client_jar = game_dir
+            .join("versions")
+            .join(mc_version)
+            .join(format!("{}.jar", mc_version));
+        if client_jar.exists() && seen_jars.insert(client_jar.clone()) {
+            classpath_entries.push(client_jar);
+        }
     }
 
     let classpath_sep = if cfg!(windows) { ";" } else { ":" };
@@ -1172,4 +1606,42 @@ pub async fn launch_minecraft(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_java_versions_and_arch() {
+        let j21 = "openjdk version \"21.0.5\" 2024-10-15 LTS\nOpenJDK 64-Bit Server VM";
+        assert_eq!(
+            parse_java_version_details(j21),
+            Some((21, "21.0.5".into(), "64-bit".into()))
+        );
+
+        let j25 = "openjdk version \"25.0.5\" 2025-10-21 LTS\nOpenJDK 64-Bit Server VM";
+        assert_eq!(
+            parse_java_version_details(j25),
+            Some((25, "25.0.5".into(), "64-bit".into()))
+        );
+
+        let j8 = "java version \"1.8.0_402\"\nJava HotSpot(TM) 64-Bit Server VM";
+        assert_eq!(
+            parse_java_version_details(j8),
+            Some((8, "1.8.0_402".into(), "64-bit".into()))
+        );
+    }
+
+    #[test]
+    fn enforces_java_compatibility_and_neoforge_classpath() {
+        assert!(is_java_compatible(21, 21).0);
+        assert!(!is_java_compatible(25, 21).0);
+        assert!(!is_java_compatible(17, 21).0);
+
+        assert!(!should_include_vanilla_client_jar("neoforge"));
+        assert!(!should_include_vanilla_client_jar("NeoForge"));
+        assert!(!should_include_vanilla_client_jar("forge"));
+        assert!(should_include_vanilla_client_jar("fabric"));
+    }
 }

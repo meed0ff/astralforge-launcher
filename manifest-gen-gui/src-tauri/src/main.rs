@@ -1,4 +1,7 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(not(debug_assertions), feature = "desktop"), windows_subsystem = "windows")]
+
+mod ui_bridge;
+mod webui_server;
 
 use base64::Engine as _;
 use futures_util::StreamExt;
@@ -10,8 +13,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use ui_bridge::UiHandle;
 
 const CONFIG_FILE: &str = "repo_config.json";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -377,7 +381,7 @@ fn neoforge_prefix_for_mc(mc_version: &str) -> Option<String> {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn detect_initial_dir() -> String {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
@@ -403,7 +407,7 @@ fn detect_initial_dir() -> String {
         .to_string()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 async fn pick_folder(initial_dir: String) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
@@ -543,7 +547,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn open_folder(dir: String) -> Result<(), String> {
     let path = PathBuf::from(dir);
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
@@ -668,7 +672,7 @@ fn compute_local_pack_size(base_dir: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn inspect_modpack_dir(dir: String) -> Result<ModpackOverview, String> {
     let base_dir = PathBuf::from(dir.trim());
     if !base_dir.is_dir() {
@@ -745,7 +749,7 @@ fn inspect_modpack_dir(dir: String) -> Result<ModpackOverview, String> {
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 async fn fetch_loader_versions(loader_type: String, mc_version: String) -> Result<Vec<String>, String> {
     let mc = mc_version.trim();
     if mc.is_empty() {
@@ -848,9 +852,8 @@ async fn fetch_loader_versions(loader_type: String, mc_version: String) -> Resul
     }
 }
 
-#[tauri::command]
-async fn generate_manifest(
-    app: AppHandle,
+async fn cmd_generate_manifest(
+    app: UiHandle,
     dir: String,
     mut config: RepoConfig,
 ) -> Result<GenerateSummary, String> {
@@ -1255,22 +1258,22 @@ fn save_token_for(provider: &str, token: &str) -> Result<(), String> {
     fs::write(&path, trimmed).map_err(|e| format!("Не удалось сохранить токен: {}", e))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn load_github_token() -> String {
     load_token_for("github")
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn save_github_token(token: String) -> Result<(), String> {
     save_token_for("github", &token)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn load_gitlab_token() -> String {
     load_token_for("gitlab")
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 fn save_gitlab_token(token: String) -> Result<(), String> {
     save_token_for("gitlab", &token)
 }
@@ -1758,7 +1761,7 @@ async fn estimate_remote_pack_sizes(
     Some((total_pack_bytes, needed_bytes))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 async fn check_remote_sync(
     dir: String,
     owner: String,
@@ -2051,7 +2054,7 @@ async fn download_raw_bytes(
 }
 
 async fn download_raw_bytes_stream(
-    app: &AppHandle,
+    app: &UiHandle,
     client: &reqwest::Client,
     url: &str,
     file_name: &str,
@@ -2175,9 +2178,8 @@ fn collect_managed_local_files(base_dir: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-#[tauri::command]
-async fn download_modpack_from_github(
-    app: AppHandle,
+async fn cmd_download_modpack_from_github(
+    app: UiHandle,
     dir: String,
     owner: String,
     repo: String,
@@ -2610,7 +2612,7 @@ fn map_github_http_error(status: reqwest::StatusCode, body: &str, owner: &str, r
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 async fn check_github_access(
     owner: String,
     repo: String,
@@ -2733,7 +2735,7 @@ fn is_managed_pack_path(path: &str) -> bool {
 }
 
 async fn publish_to_gitlab_inner(
-    app: &AppHandle,
+    app: &UiHandle,
     base_dir: &Path,
     config: &RepoConfig,
     manifest_val: &Value,
@@ -3057,9 +3059,8 @@ async fn publish_to_gitlab_inner(
     })
 }
 
-#[tauri::command]
-async fn publish_to_github(
-    app: AppHandle,
+async fn cmd_publish_to_github(
+    app: UiHandle,
     dir: String,
     token: String,
     commit_message: Option<String>,
@@ -3459,29 +3460,204 @@ async fn publish_to_github(
     })
 }
 
+#[cfg(feature = "desktop")]
+mod tauri_commands {
+    use super::*;
+    use tauri::AppHandle;
+
+    #[tauri::command]
+    pub async fn generate_manifest(
+        app: AppHandle,
+        dir: String,
+        config: RepoConfig,
+    ) -> Result<GenerateSummary, String> {
+        cmd_generate_manifest(UiHandle::from_tauri(app), dir, config).await
+    }
+
+    #[tauri::command]
+    pub async fn download_modpack_from_github(
+        app: AppHandle,
+        dir: String,
+        owner: String,
+        repo: String,
+        branch: String,
+        token: String,
+        provider: Option<String>,
+    ) -> Result<DownloadSummary, String> {
+        cmd_download_modpack_from_github(
+            UiHandle::from_tauri(app),
+            dir,
+            owner,
+            repo,
+            branch,
+            token,
+            provider,
+        )
+        .await
+    }
+
+    #[tauri::command]
+    pub async fn publish_to_github(
+        app: AppHandle,
+        dir: String,
+        token: String,
+        commit_message: Option<String>,
+        provider: Option<String>,
+    ) -> Result<PublishSummary, String> {
+        cmd_publish_to_github(
+            UiHandle::from_tauri(app),
+            dir,
+            token,
+            commit_message,
+            provider,
+        )
+        .await
+    }
+}
+
+fn dispatch_web_command(
+    cmd: String,
+    args: Value,
+    ui: UiHandle,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> {
+    Box::pin(async move {
+        match cmd.as_str() {
+            "detect_initial_dir" => Ok(Value::String(detect_initial_dir())),
+            "pick_folder" => {
+                let initial_dir = args["initialDir"]
+                    .as_str()
+                    .or_else(|| args["initial_dir"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let res = pick_folder(initial_dir).await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "open_folder" => {
+                let dir = args["dir"].as_str().unwrap_or("").to_string();
+                open_folder(dir)?;
+                Ok(Value::Null)
+            }
+            "inspect_modpack_dir" => {
+                let dir = args["dir"].as_str().unwrap_or("").to_string();
+                let res = inspect_modpack_dir(dir)?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "fetch_loader_versions" => {
+                let loader_type = args["loaderType"]
+                    .as_str()
+                    .or_else(|| args["loader_type"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mc_version = args["mcVersion"]
+                    .as_str()
+                    .or_else(|| args["mc_version"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let res = fetch_loader_versions(loader_type, mc_version).await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "generate_manifest" => {
+                let dir = args["dir"].as_str().unwrap_or("").to_string();
+                let config: RepoConfig = serde_json::from_value(args["config"].clone())
+                    .map_err(|e| format!("Некорректный RepoConfig: {}", e))?;
+                let res = cmd_generate_manifest(ui, dir, config).await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "load_github_token" => Ok(Value::String(load_github_token())),
+            "save_github_token" => {
+                let token = args["token"].as_str().unwrap_or("").to_string();
+                save_github_token(token)?;
+                Ok(Value::Null)
+            }
+            "load_gitlab_token" => Ok(Value::String(load_gitlab_token())),
+            "save_gitlab_token" => {
+                let token = args["token"].as_str().unwrap_or("").to_string();
+                save_gitlab_token(token)?;
+                Ok(Value::Null)
+            }
+            "check_github_access" => {
+                let owner = args["owner"].as_str().unwrap_or("").to_string();
+                let repo = args["repo"].as_str().unwrap_or("").to_string();
+                let token = args["token"].as_str().unwrap_or("").to_string();
+                let provider = args["provider"].as_str().map(|s| s.to_string());
+                let res = check_github_access(owner, repo, token, provider).await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "check_remote_sync" => {
+                let dir = args["dir"].as_str().unwrap_or("").to_string();
+                let owner = args["owner"].as_str().unwrap_or("").to_string();
+                let repo = args["repo"].as_str().unwrap_or("").to_string();
+                let branch = args["branch"].as_str().unwrap_or("").to_string();
+                let token = args["token"].as_str().unwrap_or("").to_string();
+                let provider = args["provider"].as_str().map(|s| s.to_string());
+                let res = check_remote_sync(dir, owner, repo, branch, token, provider).await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "download_modpack_from_github" => {
+                let dir = args["dir"].as_str().unwrap_or("").to_string();
+                let owner = args["owner"].as_str().unwrap_or("").to_string();
+                let repo = args["repo"].as_str().unwrap_or("").to_string();
+                let branch = args["branch"].as_str().unwrap_or("").to_string();
+                let token = args["token"].as_str().unwrap_or("").to_string();
+                let provider = args["provider"].as_str().map(|s| s.to_string());
+                let res = cmd_download_modpack_from_github(
+                    ui, dir, owner, repo, branch, token, provider,
+                )
+                .await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            "publish_to_github" => {
+                let dir = args["dir"].as_str().unwrap_or("").to_string();
+                let token = args["token"].as_str().unwrap_or("").to_string();
+                let commit_message = args["commitMessage"]
+                    .as_str()
+                    .or_else(|| args["commit_message"].as_str())
+                    .map(|s| s.to_string());
+                let provider = args["provider"].as_str().map(|s| s.to_string());
+                let res = cmd_publish_to_github(ui, dir, token, commit_message, provider).await?;
+                serde_json::to_value(res).map_err(|e| e.to_string())
+            }
+            _ => Err(format!("Неизвестная команда: {}", cmd)),
+        }
+    })
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            detect_initial_dir,
-            pick_folder,
-            open_folder,
-            inspect_modpack_dir,
-            fetch_loader_versions,
-            generate_manifest,
-            load_github_token,
-            save_github_token,
-            load_gitlab_token,
-            save_gitlab_token,
-            check_github_access,
-            check_remote_sync,
-            download_modpack_from_github,
-            publish_to_github
-        ])
-        .run(tauri::generate_context!())
-        .expect("Ошибка запуска Eternum Modpack Manager");
+    let force_web = std::env::args().any(|a| a == "--web")
+        || std::env::var_os("ETERNUM_WEBUI").is_some();
+
+    #[cfg(feature = "desktop")]
+    if !force_web && ui_bridge::has_webview2_runtime() {
+        tauri::Builder::default()
+            .invoke_handler(tauri::generate_handler![
+                detect_initial_dir,
+                pick_folder,
+                open_folder,
+                inspect_modpack_dir,
+                fetch_loader_versions,
+                tauri_commands::generate_manifest,
+                load_github_token,
+                save_github_token,
+                load_gitlab_token,
+                save_gitlab_token,
+                check_github_access,
+                check_remote_sync,
+                tauri_commands::download_modpack_from_github,
+                tauri_commands::publish_to_github
+            ])
+            .run(tauri::generate_context!())
+            .expect("Ошибка запуска Eternum Modpack Manager");
+        return;
+    }
+
+    let _ = force_web;
+    webui_server::run_webui_blocking(
+        "Eternum Modpack Manager",
+        Arc::new(|cmd, args, ui| dispatch_web_command(cmd, args, ui)),
+    );
 }

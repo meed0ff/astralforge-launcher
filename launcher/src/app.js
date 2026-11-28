@@ -72,7 +72,25 @@ const settingManifestUrl = document.getElementById("setting-manifest-url");
 const mirrorBtns = Array.from(document.querySelectorAll(".mirror-btn"));
 let currentMirror = "github";
 const settingJavaPath = document.getElementById("setting-java-path");
+const settingStrictJava = document.getElementById("setting-strict-java");
+const javaReqHint = document.getElementById("java-req-hint");
+const btnDetectJava = document.getElementById("btn-detect-java");
+const btnAutoJava = document.getElementById("btn-auto-java");
+const javaModal = document.getElementById("java-modal");
+const btnJavaModalClose = document.getElementById("btn-java-modal-close");
+const btnJavaRescan = document.getElementById("btn-java-rescan");
+const btnJavaInstall = document.getElementById("btn-java-install");
+const javaInstallVerEl = document.getElementById("java-install-ver");
+const javaModalSubtitle = document.getElementById("java-modal-subtitle");
+const javaTableBody = document.getElementById("java-table-body");
+const btnJavaUseAuto = document.getElementById("btn-java-use-auto");
+const btnJavaApply = document.getElementById("btn-java-apply");
 const btnOpenGameFolder = document.getElementById("btn-open-game-folder");
+
+let requiredJavaMajor = 21;
+let currentPackDesc = "Minecraft 1.21.1";
+let detectedJavaList = [];
+let selectedJavaCandidatePath = null;
 
 const serverIpBtn = document.getElementById("server-ip-btn");
 const serverIpText = document.getElementById("server-ip-text");
@@ -293,13 +311,166 @@ for (const btn of mirrorBtns) {
   });
 }
 
+function inferRequiredJavaFromMc(mcVersion) {
+  const parts = String(mcVersion || "1.21.1").trim().split(".").map((n) => parseInt(n, 10) || 0);
+  if (parts[0] >= 26) return 25;
+  if (parts[0] === 1) {
+    const minor = parts[1] || 21;
+    const patch = parts[2] || 0;
+    if (minor <= 16) return 8;
+    if (minor <= 19 || (minor === 20 && patch < 5)) return 17;
+    return 21;
+  }
+  return 21;
+}
+
+function updateJavaRequirementLabels() {
+  if (javaReqHint) {
+    javaReqHint.textContent = `требуется Java ${requiredJavaMajor} (${currentPackDesc})`;
+  }
+  if (javaInstallVerEl) {
+    javaInstallVerEl.textContent = String(requiredJavaMajor);
+  }
+  if (javaModalSubtitle) {
+    javaModalSubtitle.textContent = `Для ${currentPackDesc} требуется Java ${requiredJavaMajor}. При «auto» недостающая Java ${requiredJavaMajor} скачается сама.`;
+  }
+}
+
+async function scanSystemJavas() {
+  if (!hasTauri || !javaTableBody) return;
+  selectedJavaCandidatePath = null;
+  javaTableBody.innerHTML = '<tr><td colspan="5" class="java-empty">🔍 Сканирование системы...</td></tr>';
+  if (btnJavaRescan) btnJavaRescan.disabled = true;
+  try {
+    const list = await window.__TAURI__.core.invoke("detect_java_installations", {
+      requiredMajor: requiredJavaMajor
+    });
+    detectedJavaList = list || [];
+    javaTableBody.innerHTML = "";
+    if (detectedJavaList.length === 0) {
+      javaTableBody.innerHTML = `<tr><td colspan="5" class="java-empty">Java не найдена. Нажмите «⬇ Скачать Java ${requiredJavaMajor}» или оставьте «auto».</td></tr>`;
+      return;
+    }
+    const currentPath = (settingJavaPath?.value || "").trim().toLowerCase();
+    for (const item of detectedJavaList) {
+      const tr = document.createElement("tr");
+      tr.className = "java-row";
+      if (item.path.toLowerCase() === currentPath || (!selectedJavaCandidatePath && item.compatible)) {
+        tr.classList.add("selected");
+        selectedJavaCandidatePath = item.path;
+      }
+
+      const tdVer = document.createElement("td");
+      tdVer.textContent = `${item.version} (Java ${item.major})`;
+      const tdArch = document.createElement("td");
+      tdArch.textContent = item.arch;
+      const tdVendor = document.createElement("td");
+      tdVendor.textContent = item.vendor;
+      const tdStatus = document.createElement("td");
+      tdStatus.className = item.compatible ? "java-badge-ok" : "java-badge-bad";
+      tdStatus.textContent = item.note;
+      const tdPath = document.createElement("td");
+      tdPath.className = "java-path-cell";
+      tdPath.textContent = item.path;
+
+      tr.append(tdVer, tdArch, tdVendor, tdStatus, tdPath);
+      tr.addEventListener("click", () => {
+        for (const r of javaTableBody.querySelectorAll(".java-row")) {
+          r.classList.remove("selected");
+        }
+        tr.classList.add("selected");
+        selectedJavaCandidatePath = item.path;
+      });
+      tr.addEventListener("dblclick", () => {
+        if (settingJavaPath) settingJavaPath.value = item.path;
+        if (javaModal) javaModal.classList.add("hidden");
+        showToast(`Выбрана Java ${item.major}: ${item.version}`, "success");
+      });
+      javaTableBody.appendChild(tr);
+    }
+  } catch (err) {
+    javaTableBody.innerHTML = `<tr><td colspan="5" class="java-empty">Ошибка сканирования: ${err}</td></tr>`;
+  } finally {
+    if (btnJavaRescan) btnJavaRescan.disabled = false;
+  }
+}
+
+if (btnDetectJava) {
+  btnDetectJava.addEventListener("click", () => {
+    updateJavaRequirementLabels();
+    if (javaModal) javaModal.classList.remove("hidden");
+    scanSystemJavas();
+  });
+}
+
+if (btnAutoJava) {
+  btnAutoJava.addEventListener("click", () => {
+    if (settingJavaPath) settingJavaPath.value = "auto";
+    showToast(`Установлен автоподбор Java ${requiredJavaMajor}`, "info");
+  });
+}
+
+if (btnJavaModalClose) {
+  btnJavaModalClose.addEventListener("click", () => javaModal.classList.add("hidden"));
+}
+
+if (btnJavaRescan) {
+  btnJavaRescan.addEventListener("click", scanSystemJavas);
+}
+
+if (btnJavaUseAuto) {
+  btnJavaUseAuto.addEventListener("click", () => {
+    if (settingJavaPath) settingJavaPath.value = "auto";
+    if (javaModal) javaModal.classList.add("hidden");
+    showToast(`Установлен автоподбор Java ${requiredJavaMajor}`, "success");
+  });
+}
+
+if (btnJavaApply) {
+  btnJavaApply.addEventListener("click", () => {
+    if (!selectedJavaCandidatePath) {
+      showToast("Выберите строку в таблице Java.", "error");
+      return;
+    }
+    if (settingJavaPath) settingJavaPath.value = selectedJavaCandidatePath;
+    if (javaModal) javaModal.classList.add("hidden");
+    showToast("Путь к Java обновлён (нажмите «Сохранить» в Настройках)", "success");
+  });
+}
+
+if (btnJavaInstall) {
+  btnJavaInstall.addEventListener("click", async () => {
+    if (!hasTauri) return;
+    btnJavaInstall.disabled = true;
+    const oldText = btnJavaInstall.innerHTML;
+    btnJavaInstall.textContent = `⏳ Скачивание Java ${requiredJavaMajor}...`;
+    try {
+      const installedPath = await window.__TAURI__.core.invoke("install_java_runtime", {
+        major: requiredJavaMajor
+      });
+      if (settingJavaPath) settingJavaPath.value = installedPath;
+      showToast(`Java ${requiredJavaMajor} (Eclipse Temurin) установлена!`, "success");
+      await scanSystemJavas();
+    } catch (err) {
+      showToast(`Ошибка установки Java: ${err}`, "error");
+      addLog(`Ошибка установки Java ${requiredJavaMajor}: ${err}`, "error");
+    } finally {
+      btnJavaInstall.disabled = false;
+      btnJavaInstall.innerHTML = oldText;
+    }
+  });
+}
+
 btnSaveSettings.addEventListener("click", () => {
   setRamGb(ramInput ? ramInput.value : currentRamGb);
   localStorage.setItem("astral_mirror", currentMirror);
   localStorage.setItem("astral_manifest_url", settingManifestUrl.value);
-  localStorage.setItem("astral_java_path", settingJavaPath.value);
+  localStorage.setItem("astral_java_path", settingJavaPath.value.trim() || "auto");
+  if (settingStrictJava) {
+    localStorage.setItem("astral_strict_java", settingStrictJava.checked ? "1" : "0");
+  }
   settingsModal.classList.add("hidden");
-  addLog(`Настройки сохранены (зеркало: ${currentMirror === "gitlab" ? "GitLab" : "GitHub"}).`);
+  addLog(`Настройки сохранены (зеркало: ${currentMirror === "gitlab" ? "GitLab" : "GitHub"}, Java: ${settingJavaPath.value.trim() || "auto"}).`);
   showToast("Настройки сохранены", "success");
   refreshManifestMetadata();
 });
@@ -404,7 +575,8 @@ btnPlay.addEventListener("click", async () => {
     uuid,
     accessToken,
     ramGb: currentRamGb,
-    javaPath: settingJavaPath.value.trim() || "java",
+    javaPath: settingJavaPath.value.trim() || "auto",
+    strictJavaCheck: settingStrictJava ? settingStrictJava.checked : true,
     manifestUrl: settingManifestUrl.value.trim(),
     mirrorSource: currentMirror
   };
@@ -482,6 +654,9 @@ function refreshManifestMetadata() {
   window.__TAURI__.core.invoke("fetch_manifest_info", { manifestUrl, mirrorSource: currentMirror })
     .then((info) => {
       const loaderLabel = info.loader_type.charAt(0).toUpperCase() + info.loader_type.slice(1);
+      requiredJavaMajor = inferRequiredJavaFromMc(info.minecraft_version);
+      currentPackDesc = `${info.minecraft_version} ${loaderLabel}`;
+      updateJavaRequirementLabels();
       if (versionBadgeEl) {
         const sizeLabel = info.total_pack_bytes ? ` · ${formatBytes(info.total_pack_bytes)}` : "";
         versionBadgeEl.textContent = info.pack_version
@@ -557,6 +732,11 @@ function initLauncher() {
 
     const savedJavaPath = localStorage.getItem("astral_java_path");
     if (savedJavaPath) settingJavaPath.value = savedJavaPath;
+    const savedStrictJava = localStorage.getItem("astral_strict_java");
+    if (settingStrictJava && savedStrictJava !== null) {
+      settingStrictJava.checked = savedStrictJava !== "0";
+    }
+    updateJavaRequirementLabels();
   } catch (e) {
     addLog("Ошибка чтения localStorage: " + e, "error");
   }

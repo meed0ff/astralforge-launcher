@@ -69,6 +69,62 @@ jobs:
           name: windows-portable
           path: release-win/*
 
+  build-windows-win7:
+    name: Windows 7 Portable (No WebView2)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Nightly (Win7 target)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-win7-windows-msvc
+          components: rust-src
+
+      - name: Rust cache (win7)
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "win7-webui"
+          workspaces: |
+            launcher/src-tauri
+            manifest-gen-gui/src-tauri
+
+      - name: Build Eternum Launcher (Win7 WebUI, no WebView2)
+        working-directory: launcher/src-tauri
+        run: cargo build --release --target x86_64-win7-windows-msvc --no-default-features --features webui -Z build-std
+
+      - name: Build Eternum Modpack Manager (Win7 WebUI, no WebView2)
+        working-directory: manifest-gen-gui/src-tauri
+        run: cargo build --release --target x86_64-win7-windows-msvc --no-default-features --features webui -Z build-std
+
+      - name: Verify Win7 binaries & collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release-win7 -Force | Out-Null
+          Copy-Item "launcher/src-tauri/target/x86_64-win7-windows-msvc/release/eternum-launcher.exe" "release-win7/EternumLauncher-win7-x64.exe" -Force
+          Copy-Item "manifest-gen-gui/src-tauri/target/x86_64-win7-windows-msvc/release/eternum-manifest-studio.exe" "release-win7/EternumModpackManager-win7-x64.exe" -Force
+          Get-ChildItem release-win7 | Select-Object Name, Length
+
+      - name: Check Win7 PE imports (must omit Win8/10+ & WebView2 APIs)
+        shell: bash
+        run: |
+          for f in release-win7/*.exe; do
+            echo "Checking imports of $f..."
+            if command -v objdump >/dev/null 2>&1; then
+              if objdump -p "$f" | grep -iE "ProcessPrng|WaitOnAddress|GetSystemTimePreciseAsFileTime|WebView2Loader\.dll|combase\.dll|api-ms-win-core-winrt"; then
+                echo "ERROR: Incompatible Win8/10+ import detected in $f!"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Upload Windows 7 portable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-win7-portable
+          path: release-win7/*
+
   build-linux:
     name: Linux Portable (.AppImage)
     runs-on: ubuntu-22.04
@@ -199,13 +255,19 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: [build-windows, build-linux, build-fedora]
+    needs: [build-windows, build-windows-win7, build-linux, build-fedora]
     runs-on: ubuntu-latest
     steps:
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
           name: windows-portable
+          path: release-assets
+
+      - name: Download Windows 7 (No WebView2) artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-win7-portable
           path: release-assets
 
       - name: Download Linux AppImage artifacts
@@ -235,11 +297,15 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Eternum Launcher & Modpack Manager (${{ steps.tag.outputs.name }})
           body: |
-            Портативные сборки **Eternum Launcher** и **Eternum Modpack Manager** для **Windows** и **Linux** (без установщиков).
+            Портативные сборки **Eternum Launcher** и **Eternum Modpack Manager** для **Windows 10/11**, **Windows 7 (без WebView2)** и **Linux** (без установщиков).
 
-            ### Windows (x64)
+            ### Windows 10/11 (x64)
             - `EternumLauncher-win64.exe` — лаунчер для игроков
             - `EternumModpackManager-win64.exe` — менеджер сборки для администраторов
+
+            ### Windows 7 SP1 (x64, без WebView2 — открывает UI в браузере)
+            - `EternumLauncher-win7-x64.exe` — лаунчер для Windows 7
+            - `EternumModpackManager-win7-x64.exe` — менеджер сборки для Windows 7
 
             ### Fedora / Linux (нативные бинарники)
             - `EternumLauncher-fedora-x86_64` — нативный бинарник лаунчера (`chmod +x` и `./EternumLauncher-fedora-x86_64`)

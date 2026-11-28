@@ -5,15 +5,20 @@ description = "Eternum Minecraft Launcher"
 authors = ["Eternum Team"]
 edition = "2021"
 
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build", "reqwest/default-tls"]
+webui = ["reqwest/rustls-tls-webpki-roots"]
+
 [build-dependencies]
-tauri-build = { version = "2.0.0", features = [] }
+tauri-build = { version = "2.0.0", optional = true, features = [] }
 
 [dependencies]
-tauri = { version = "2.0.0", features = [] }
+tauri = { version = "2.0.0", optional = true, features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.38", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 sha2 = "0.10"
 hex = "0.4"
 futures-util = "0.3"

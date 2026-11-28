@@ -170,8 +170,16 @@
           <input type="text" id="setting-manifest-url" value="https://raw.githubusercontent.com/meed0ff/eternum-modpack/main/manifest.json" />
         </div>
         <div class="form-group">
-          <label>Путь к Java:</label>
-          <input type="text" id="setting-java-path" placeholder="Автоопределение (java)" value="java" />
+          <label>Путь к Java (<span id="java-req-hint" class="java-req-hint">требуется Java 21</span>):</label>
+          <div class="java-input-row">
+            <input type="text" id="setting-java-path" placeholder="Автоопределение (auto)" value="auto" />
+            <button type="button" id="btn-detect-java" class="btn-secondary btn-compact" title="Окно автоопределения версий Java в системе">🔍 Автопоиск</button>
+            <button type="button" id="btn-auto-java" class="btn-secondary btn-compact" title="Сбросить на автоматический выбор Java">Авто</button>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" id="setting-strict-java" checked />
+            <span>Проверять совместимость версии Java при запуске</span>
+          </label>
         </div>
         <div class="form-group">
           <label>Каталог игры:</label>
@@ -181,6 +189,43 @@
       <div class="modal-footer">
         <button id="btn-open-game-folder" class="btn-secondary">📁 Открыть папку игры</button>
         <button id="btn-save-settings" class="btn-primary">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Prism-style Java Detector Modal -->
+  <div class="modal-overlay hidden" id="java-modal">
+    <div class="modal-box modal-box-wide">
+      <div class="modal-header">
+        <div>
+          <h3>☕ Выбор Java в системе</h3>
+          <div class="java-modal-subtitle" id="java-modal-subtitle">Требуется: Java 21 (автопоиск скачает Temurin 21 при отсутствии)</div>
+        </div>
+        <button id="btn-java-modal-close" class="close-btn">✕</button>
+      </div>
+      <div class="java-toolbar">
+        <button type="button" id="btn-java-rescan" class="btn-secondary btn-compact">🔄 Обновить список</button>
+        <button type="button" id="btn-java-install" class="btn-secondary btn-compact">⬇ Скачать Java <span id="java-install-ver">21</span></button>
+      </div>
+      <div class="java-table-wrap">
+        <table class="java-table">
+          <thead>
+            <tr>
+              <th>Версия</th>
+              <th>Арх.</th>
+              <th>Поставщик</th>
+              <th>Статус</th>
+              <th>Путь к java</th>
+            </tr>
+          </thead>
+          <tbody id="java-table-body">
+            <tr><td colspan="5" class="java-empty">Нажмите «Обновить список» для поиска Java...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="btn-java-use-auto" class="btn-secondary">Использовать Авто (auto)</button>
+        <button type="button" id="btn-java-apply" class="btn-primary">Выбрать указанную Java</button>
       </div>
     </div>
   </div>

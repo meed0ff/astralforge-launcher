@@ -16,15 +16,17 @@
 
 Файлы в релизах:
 * **Для игроков:**
-  * Windows: `EternumLauncher-win64.exe`
+  * Windows 10/11: `EternumLauncher-win64.exe`
+  * Windows 7 SP1 (без WebView2): `EternumLauncher-win7-x64.exe` *(автоматически открывает интерфейс в вашем браузере)*
   * Fedora (нативный бинарник): `EternumLauncher-fedora-x86_64` (`chmod +x EternumLauncher-fedora-x86_64 && ./EternumLauncher-fedora-x86_64`)
   * Linux (универсальный AppImage): `EternumLauncher-linux-x86_64.AppImage` (`chmod +x EternumLauncher-linux-x86_64.AppImage && ./EternumLauncher-linux-x86_64.AppImage`)
 * **Для администраторов сборки:**
-  * Windows: `EternumModpackManager-win64.exe`
+  * Windows 10/11: `EternumModpackManager-win64.exe`
+  * Windows 7 SP1 (без WebView2): `EternumModpackManager-win7-x64.exe` *(интерфейс в браузере без WebView2)*
   * Fedora (нативный бинарник): `EternumModpackManager-fedora-x86_64` (`chmod +x` и запуск)
   * Linux (универсальный AppImage): `EternumModpackManager-linux-x86_64.AppImage` (`chmod +x` и запуск)
 
-> **Примечание для Windows:** официальная сборка в Releases собрана через MSVC, поэтому запускается одним `.exe` файлом. При локальной сборке через MinGW (`x86_64-pc-windows-gnu`) рядом с `.exe` должен лежать `WebView2Loader.dll`.
+> **Примечание для Windows:** обычные `win64.exe` при отсутствии WebView2 на Windows 8/10/11 также умеют открываться в браузере (и через флаг `--web`), а для **Windows 7 SP1** предназначены специальные сборки `*-win7-x64.exe` без зависимостей от Win10 API и WebView2. При локальной сборке через MinGW (`x86_64-pc-windows-gnu`) рядом с `win64.exe` должен лежать `WebView2Loader.dll`.
 
 ---
 

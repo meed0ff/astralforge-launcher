@@ -1,11 +1,11 @@
 use crate::manifest::ManifestFile;
+use crate::ui_bridge::UiHandle;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
 
 fn safe_join_rel(base: &Path, rel: &str) -> Result<PathBuf, String> {
     let trimmed = rel.trim();
@@ -116,7 +116,7 @@ impl DownloadTracker {
         }
     }
 
-    pub fn emit_snapshot(&self, app: &AppHandle, force: bool) {
+    pub fn emit_snapshot(&self, app: &UiHandle, force: bool) {
         let payload = {
             let Ok(mut st) = self.inner.lock() else {
                 return;
@@ -156,7 +156,7 @@ impl DownloadTracker {
 
     pub fn on_chunk(
         &self,
-        app: &AppHandle,
+        app: &UiHandle,
         file_name: &str,
         chunk_len: u64,
         file_downloaded: u64,
@@ -334,7 +334,7 @@ pub async fn download_file_with_progress(
     url: &str,
     target_path: &Path,
     expected_sha256: &str,
-    app: Option<&AppHandle>,
+    app: Option<&UiHandle>,
     file_label: &str,
     known_size: u64,
     total_downloaded_so_far: u64,
@@ -467,7 +467,7 @@ pub async fn download_file_with_progress(
 }
 
 pub async fn download_file_tracked(
-    app: &AppHandle,
+    app: &UiHandle,
     tracker: &DownloadTracker,
     client: &reqwest::Client,
     url: &str,
@@ -576,7 +576,7 @@ async fn download_with_mirror(
     fallback_url: Option<&str>,
     target_path: &Path,
     expected_sha256: &str,
-    app: Option<&AppHandle>,
+    app: Option<&UiHandle>,
     display_name: &str,
     known_size: u64,
     total_downloaded_so_far: u64,
@@ -632,7 +632,7 @@ async fn download_with_mirror(
 
 /// Синхронизирует файлы сборки (моды, конфиги, ресурспаки, шейдеры, kubejs и zip-бандлы)
 pub async fn sync_files(
-    app: &AppHandle,
+    app: &UiHandle,
     client: &reqwest::Client,
     game_dir: &Path,
     files: &[ManifestFile],
