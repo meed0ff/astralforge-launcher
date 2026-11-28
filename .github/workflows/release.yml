@@ -263,6 +263,11 @@ jobs:
     needs: [build-windows, build-windows-win7, build-linux, build-fedora]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository for changelog
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
@@ -286,11 +291,6 @@ jobs:
         with:
           name: fedora-portable
           path: release-assets
-
-      - name: Checkout repository for changelog
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Determine release tag & changelog notes
         id: tag
@@ -358,6 +358,7 @@ jobs:
           name: Eternum Launcher & Modpack Manager (${{ steps.tag.outputs.name }})
           body_path: release_body.md
           files: release-assets/*
+          fail_on_unmatched_files: true
           make_latest: true
 
       - name: Sync Release & Assets to GitLab
